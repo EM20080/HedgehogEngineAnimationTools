@@ -1,0 +1,3 @@
+[submodule "extern/HavokLib-blender"]
+	path = extern/HavokLib-blender
+	url = https://github.com/EM20080/HavokLib-blender.git

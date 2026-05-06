@@ -1,0 +1,35 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64-release",
+      "displayName": "Windows x64 Release",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {}
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "HedgehogEngineAnimationTools"
+      ]
+    },
+    {
+      "name": "windows-x64-release-package",
+      "configurePreset": "windows-x64-release",
+      "configuration": "Release",
+      "targets": [
+        "package_addon"
+      ]
+    }
+  ]
+}

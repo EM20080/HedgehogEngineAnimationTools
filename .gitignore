@@ -30,3 +30,19 @@
 *.exe
 *.out
 *.app
+
+# CMake
+.vs/
+out/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Keep release folders but not generated artifacts.
+!bin/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
