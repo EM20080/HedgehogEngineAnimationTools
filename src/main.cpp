@@ -58,13 +58,22 @@ struct Preset {
 enum GameType {
   GENERATIONS_GAME_TYPE = 0,
   UNLEASHED_GAME_TYPE = 1,
+  LOST_WORLD_GAME_TYPE = 2,
 };
 
 constexpr Preset GENERATIONS_HAVOK{HK2010_2, 0x4101};
 constexpr Preset UNLEASHED_HAVOK{HK550, 0x4001};
+constexpr Preset LOST_WORLD_HAVOK{HK2012_2, 0x4101};
 
 Preset GetPreset(int preset) {
-  return preset == GENERATIONS_GAME_TYPE ? GENERATIONS_HAVOK : UNLEASHED_HAVOK;
+  switch (preset) {
+  case GENERATIONS_GAME_TYPE:
+    return GENERATIONS_HAVOK;
+  case LOST_WORLD_GAME_TYPE:
+    return LOST_WORLD_HAVOK;
+  default:
+    return UNLEASHED_HAVOK;
+  }
 }
 
 hkaSplineCompressionSettings GetSplineSettings(int preset) {
