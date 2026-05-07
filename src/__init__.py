@@ -974,7 +974,6 @@ def export_compressed_animation_native(filepath, skeleton_text, animation_text, 
 PRESETS = (
     ("0", "Generations", ""),
     ("1", "Unleashed", ""),
-    ("2", "Lost World", ""),
 )
 
 
@@ -1031,9 +1030,6 @@ class HEAT_OT_export_skeleton(bpy.types.Operator, ExportHelper):
     check_extension = False
     filter_glob: StringProperty(default="*.skl.hkx;*.hkx", options={"HIDDEN"})
     preset: EnumProperty(name="Game", items=PRESETS, default="1")
-
-    def draw(self, context):
-        self.layout.prop(self, "preset")
 
     def execute(self, context):
         try:
