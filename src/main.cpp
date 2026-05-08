@@ -61,22 +61,47 @@ struct Preset {
 };
 
 enum GameType {
-  GENERATIONS_GAME_TYPE = 0,
-  UNLEASHED_GAME_TYPE = 1,
+  GENERATIONS_PC_GAME_TYPE = 0,
+  UNLEASHED_360_GAME_TYPE = 1,
+  GENERATIONS_360_GAME_TYPE = 2,
+  GENERATIONS_PS3_GAME_TYPE = 3,
+  UNLEASHED_PS3_GAME_TYPE = 4,
+  LOST_WORLD_PC_GAME_TYPE = 5,
+  LOST_WORLD_WIIU_GAME_TYPE = 6,
 };
 
-constexpr Preset GENERATIONS_HAVOK{HK2010_2, 0x4101};
-constexpr Preset UNLEASHED_HAVOK{HK550, 0x4001};
+constexpr Preset GENERATIONS_PC{HK2010_2, 0x4101};
+constexpr Preset GENERATIONS_360{HK2010_2, 0x4001};
+constexpr Preset GENERATIONS_PS3{HK2010_2, 0x4011};
+constexpr Preset UNLEASHED_360{HK550, 0x4001};
+constexpr Preset UNLEASHED_PS3{HK550, 0x4011};
+constexpr Preset LOST_WORLD_PC{HK2012_2, 0x4101};
+constexpr Preset LOST_WORLD_WIIU{HK2012_2, 0x4001};
 
 Preset GetPreset(int preset) {
-  return preset == GENERATIONS_GAME_TYPE ? GENERATIONS_HAVOK : UNLEASHED_HAVOK;
+  switch (preset) {
+  case GENERATIONS_360_GAME_TYPE:
+    return GENERATIONS_360;
+  case GENERATIONS_PS3_GAME_TYPE:
+    return GENERATIONS_PS3;
+  case UNLEASHED_PS3_GAME_TYPE:
+    return UNLEASHED_PS3;
+  case LOST_WORLD_PC_GAME_TYPE:
+    return LOST_WORLD_PC;
+  case LOST_WORLD_WIIU_GAME_TYPE:
+    return LOST_WORLD_WIIU;
+  case UNLEASHED_360_GAME_TYPE:
+    return UNLEASHED_360;
+  default:
+    return GENERATIONS_PC;
+  }
 }
 
 hkaSplineCompressionSettings GetSplineSettings(int preset) {
   hkaSplineCompressionSettings settings;
   settings.maxFramesPerBlock = 256;
   settings.keyStep = 7;
-  if (preset == UNLEASHED_GAME_TYPE) {
+  if (preset == UNLEASHED_360_GAME_TYPE || preset == UNLEASHED_PS3_GAME_TYPE) {
     settings.keyStep = 2;
   }
   return settings;
@@ -689,7 +714,7 @@ void ParseAnimationData(xmlHavokFile &file, std::string_view text,
                                         : std::move(compressionError));
       return;
     }
-    if (preset == 0) {
+    if (preset == GENERATIONS_PC_GAME_TYPE) {
       const auto extraTail = 16u * (static_cast<uint32>(numTracks) + 11u);
       spline->compressed.dataBuffer.resize(
           spline->compressed.dataBuffer.size() + extraTail, 0);
@@ -703,7 +728,7 @@ void ParseAnimationData(xmlHavokFile &file, std::string_view text,
       motion->forward = rootMotion.forward;
       motion->referenceFrames = std::move(rootMotion.samples);
       spline->extractedMotion = motion;
-    } else if (preset == 0) {
+    } else if (preset == GENERATIONS_PC_GAME_TYPE) {
       auto *motion = file.NewClass<xmlDefaultAnimatedReferenceFrame>();
       motion->duration = anim->duration;
       motion->up = Vector4A16(0.0f, 1.0f, 0.0f, 0.0f);

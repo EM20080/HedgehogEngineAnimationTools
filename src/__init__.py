@@ -974,7 +974,32 @@ def export_compressed_animation_native(filepath, skeleton_text, animation_text, 
 PRESETS = (
     ("0", "Generations", ""),
     ("1", "Unleashed", ""),
+    ("2", "Lost World", ""),
 )
+
+GENERATIONS_PLATFORMS = (
+    ("pc", "PC", ""),
+    ("ps3", "PS3", ""),
+    ("360", "360", ""),
+)
+
+UNLEASHED_PLATFORMS = (
+    ("360", "360 / Recompiled", ""),
+    ("ps3", "PS3", ""),
+)
+
+LOST_WORLD_PLATFORMS = (
+    ("pc", "PC", ""),
+    ("wiiu", "Wii U", ""),
+)
+
+
+def export_preset(game, generations="pc", unleashed="360", lost_world="pc"):
+    if game == "0":
+        return {"pc": 0, "360": 2, "ps3": 3}.get(generations, 0)
+    if game == "2":
+        return {"pc": 5, "wiiu": 6}.get(lost_world, 5)
+    return {"360": 1, "ps3": 4}.get(unleashed, 1)
 
 
 class HEAT_OT_import_skeleton(bpy.types.Operator, ImportHelper):
@@ -1030,13 +1055,26 @@ class HEAT_OT_export_skeleton(bpy.types.Operator, ExportHelper):
     check_extension = False
     filter_glob: StringProperty(default="*.skl.hkx;*.hkx", options={"HIDDEN"})
     preset: EnumProperty(name="Game", items=PRESETS, default="1")
+    generations: EnumProperty(name="Platform", items=GENERATIONS_PLATFORMS, default="pc")
+    unleashed: EnumProperty(name="Platform", items=UNLEASHED_PLATFORMS, default="360")
+    lost_world: EnumProperty(name="Platform", items=LOST_WORLD_PLATFORMS, default="pc")
+
+    def draw(self, context):
+        self.layout.prop(self, "preset")
+        if self.preset == "0":
+            self.layout.prop(self, "generations")
+        elif self.preset == "1":
+            self.layout.prop(self, "unleashed")
+        elif self.preset == "2":
+            self.layout.prop(self, "lost_world")
 
     def execute(self, context):
         try:
             arm_obj = selected_armature()
             if not arm_obj:
                 raise HeatError("Select an armature before exporting a skeleton")
-            export_skeleton_native(self.filepath, serialize_skeleton(arm_obj), int(self.preset))
+            preset = export_preset(self.preset, self.generations, self.unleashed, self.lost_world)
+            export_skeleton_native(self.filepath, serialize_skeleton(arm_obj), preset)
         except Exception as ex:
             self.report({"ERROR"}, str(ex))
             return {"CANCELLED"}
@@ -1050,10 +1088,19 @@ class HEAT_OT_export_animation(bpy.types.Operator, ExportHelper):
     check_extension = False
     filter_glob: StringProperty(default="*.anm.hkx;*.hkx", options={"HIDDEN"})
     preset: EnumProperty(name="Game", items=PRESETS, default="1")
+    generations: EnumProperty(name="Platform", items=GENERATIONS_PLATFORMS, default="pc")
+    unleashed: EnumProperty(name="Platform", items=UNLEASHED_PLATFORMS, default="360")
+    lost_world: EnumProperty(name="Platform", items=LOST_WORLD_PLATFORMS, default="pc")
     compress: BoolProperty(name="Compress Animation", default=False)
 
     def draw(self, context):
         self.layout.prop(self, "preset")
+        if self.preset == "0":
+            self.layout.prop(self, "generations")
+        elif self.preset == "1":
+            self.layout.prop(self, "unleashed")
+        elif self.preset == "2":
+            self.layout.prop(self, "lost_world")
         self.layout.prop(self, "compress")
 
     def execute(self, context):
@@ -1063,10 +1110,11 @@ class HEAT_OT_export_animation(bpy.types.Operator, ExportHelper):
                 raise HeatError("Select an armature before exporting an animation")
             skeleton = serialize_skeleton(arm_obj)
             animation = serialize_animation(arm_obj)
+            preset = export_preset(self.preset, self.generations, self.unleashed, self.lost_world)
             if self.compress:
-                export_compressed_animation_native(self.filepath, skeleton, animation, int(self.preset))
+                export_compressed_animation_native(self.filepath, skeleton, animation, preset)
             else:
-                export_animation_native(self.filepath, skeleton, animation, int(self.preset))
+                export_animation_native(self.filepath, skeleton, animation, preset)
         except Exception as ex:
             self.report({"ERROR"}, str(ex))
             return {"CANCELLED"}
