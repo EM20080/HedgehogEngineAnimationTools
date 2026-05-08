@@ -1,1 +1,2 @@
 git submodule update --remote --merge extern/HavokLib-blender
+pause
