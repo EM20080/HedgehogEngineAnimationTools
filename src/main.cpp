@@ -5,10 +5,15 @@
 #include "hklib/hka_annotationtrack.hpp"
 #include "hklib/hka_skeleton.hpp"
 #include "internal/hka_animatedreferenceframe.hpp"
+#include "internal/hka_animation.hpp"
+#include "internal/hka_deltaanimation.hpp"
+#include "internal/hka_interleavedanimation.hpp"
+#include "internal/hka_splineanimation.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -235,6 +240,15 @@ std::vector<int16> BuildTrackMap(const hkaAnimation &anim,
   const size_t numTracks = anim.GetNumOfTransformTracks();
   std::vector<int16> map(numTracks, -1);
 
+  if (binding && binding->GetNumTransformTrackToBoneIndices()) {
+    const size_t count =
+        std::min(numTracks, binding->GetNumTransformTrackToBoneIndices());
+    for (size_t i = 0; i < count; ++i) {
+      map[i] = binding->GetTransformTrackToBoneIndex(i);
+    }
+    return map;
+  }
+
   if (skeleton && anim.GetNumAnnotations() == numTracks) {
     std::unordered_map<std::string, int16> bones;
     bones.reserve(skeleton->GetNumBones());
@@ -263,20 +277,54 @@ std::vector<int16> BuildTrackMap(const hkaAnimation &anim,
     }
   }
 
-  if (binding && binding->GetNumTransformTrackToBoneIndices()) {
-    const size_t count =
-        std::min(numTracks, binding->GetNumTransformTrackToBoneIndices());
-    for (size_t i = 0; i < count; ++i) {
-      map[i] = binding->GetTransformTrackToBoneIndex(i);
-    }
-    return map;
-  }
-
   for (size_t i = 0; i < numTracks; ++i) {
     map[i] = static_cast<int16>(i);
   }
 
   return map;
+}
+
+size_t AnimationFrameCount(const hkaAnimation *animation) {
+  if (!animation) {
+    return 0;
+  }
+
+  const auto *internal =
+      dynamic_cast<const hkaAnimationInternalInterface *>(animation);
+  if (!internal) {
+    return 0;
+  }
+
+  if (const auto *interleaved =
+          dynamic_cast<const hkaInterleavedAnimationInternalInterface *>(
+              internal)) {
+    const size_t tracks = interleaved->GetNumOfTransformTracks();
+    return tracks ? interleaved->GetNumTransforms() / tracks : 0;
+  }
+
+  if (const auto *spline =
+          dynamic_cast<const hkaSplineCompressedAnimationInternalInterface *>(
+              internal)) {
+    return spline->GetNumFrames();
+  }
+
+  if (const auto *delta =
+          dynamic_cast<const hkaDeltaCompressedAnimationInternalInterface *>(
+              internal)) {
+    return delta->GetNumOfPoses();
+  }
+
+  if (const auto *lerp = dynamic_cast<const hkaAnimationLerpSampler *>(internal)) {
+    return lerp->numFrames;
+  }
+
+  const uint32 frameRate = animation->FrameRate();
+  return frameRate
+             ? static_cast<size_t>(
+                   std::round(animation->Duration() *
+                              static_cast<float>(frameRate))) +
+                   1
+             : 0;
 }
 
 std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) {
@@ -303,19 +351,34 @@ std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) 
     const_cast<hkaAnimation *>(animation)->SetReferenceSkeleton(skeleton);
   }
 
-  uint32_t fps = animation->FrameRate();
-  if (!fps) {
-    fps = 30;
-    animation->FrameRate(fps);
+  const auto *internal =
+      dynamic_cast<const hkaAnimationInternalInterface *>(animation);
+  if (!internal) {
+    SetError("Unexpected error, report to developer(s).");
+    return {};
   }
 
+  const size_t sourceFrameCount = AnimationFrameCount(animation);
   const float duration = animation->Duration();
-  const uint32_t frameCount =
-      std::max<uint32_t>(1, static_cast<uint32_t>(duration * fps + 0.5f) + 1);
+  uint32_t fps = animation->FrameRate();
+  if (!fps && duration > 0.0f && sourceFrameCount > 1) {
+    fps = static_cast<uint32_t>(
+        std::round(static_cast<float>(sourceFrameCount - 1) / duration));
+  }
+  if (!fps) {
+    fps = 30;
+  }
+
+  size_t frameCount =
+      std::max<size_t>(1, static_cast<size_t>(duration * fps + 0.5f) + 1);
+
+  if (frameCount <= 1 && sourceFrameCount > 1) {
+    frameCount = sourceFrameCount;
+  }
+
   const auto *binding =
       container ? FindBindingForAnimation(*container, animation) : nullptr;
   const auto trackMap = BuildTrackMap(*animation, binding, skeleton);
-  auto tracks = animation->Tracks();
 
   std::string out = "{\"type\":\"animation\",\"duration\":";
   out += std::to_string(duration);
@@ -353,51 +416,13 @@ std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) 
       size_t boneIndex = track;
       if (track < trackMap.size() && trackMap[track] >= 0) {
         boneIndex = static_cast<size_t>(trackMap[track]);
-      } else if (tracks) {
-        boneIndex = tracks->At(track)->BoneIndex();
       }
 
-      if (!tracks || boneIndex >= sampled.size()) {
+      if (boneIndex >= sampled.size()) {
         continue;
       }
 
-      tracks->At(track)->GetValue(sampled[boneIndex], time);
-    }
-
-    std::vector<float> modelScale(outputTrackCount, 1.0f);
-    if (skeleton) {
-      for (size_t bone = 0; bone < outputTrackCount; ++bone) {
-        float localScale = sampled[bone].scale.X;
-        if (localScale == 0.0f) {
-          localScale = 1.0f;
-        }
-        const int16 parent = skeleton->GetBoneParentID(bone);
-        if (parent >= 0 && static_cast<size_t>(parent) < modelScale.size()) {
-          modelScale[bone] = localScale * modelScale[static_cast<size_t>(parent)];
-        } else {
-          modelScale[bone] = localScale;
-        }
-      }
-
-      for (size_t bone = 0; bone < outputTrackCount; ++bone) {
-        const float uniformScale = sampled[bone].scale.X == 0.0f
-                                       ? 1.0f
-                                       : sampled[bone].scale.X;
-        sampled[bone].scale =
-            Vector4A16(uniformScale, uniformScale, uniformScale, 0.0f);
-
-        const int16 parent = skeleton->GetBoneParentID(bone);
-        if (parent < 0 || static_cast<size_t>(parent) >= modelScale.size()) {
-          continue;
-        }
-        const float parentScale = modelScale[static_cast<size_t>(parent)];
-        if (parentScale == 0.0f) {
-          continue;
-        }
-        sampled[bone].translation.X /= parentScale;
-        sampled[bone].translation.Y /= parentScale;
-        sampled[bone].translation.Z /= parentScale;
-      }
+      internal->GetValue(sampled[boneIndex], time, track);
     }
   }
 
