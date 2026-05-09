@@ -1,3 +1,9 @@
 [submodule "extern/HavokLib-blender"]
 	path = extern/HavokLib-blender
 	url = https://github.com/EM20080/HavokLib-blender.git
+[submodule "extern/acl"]
+	path = extern/acl
+	url = https://github.com/nfrechette/acl.git
+[submodule "extern/rtm"]
+	path = extern/rtm
+	url = https://github.com/nfrechette/rtm.git
