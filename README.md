@@ -15,7 +15,18 @@ Batch exporting is not supported.
 
 ## Compatibility
 
-HEAT can import tons of HKX files, including Sonic Unleashed Wii/PS2/Xbox 360/PS3, Sonic Generations PC/Xbox 360/PS3, Sonic Forces, and Sonic Generations (Remaster). HKX export is limited to Sonic Generations PC/Xbox 360/PS3, Sonic Unleashed Xbox 360/PS3, and Sonic Lost World PC/Wii U.
+HEAT can import tons of HKX files, including :
+- Sonic Unleashed (Wii/PS2/Xbox 360/PS3)
+- Sonic Generations (PC/Xbox 360/PS3/Remaster)
+- Sonic Forces
+
+
+
+- HKX export is limited to :
+
+- Sonic Generations (PC/Xbox 360/PS3)
+- Sonic Unleashed (Xbox 360/PS3)
+- Sonic Lost World (PC/Wii U)
 
 ## Install
 
