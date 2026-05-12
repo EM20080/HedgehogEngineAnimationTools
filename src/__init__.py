@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Hedgehog Engine Animation Tools",
-    "author": "EM and AdelQue",
+    "author": "EM",
     "version": (0, 1, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > Hedgehog Engine Animation",
@@ -22,12 +22,13 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Matrix, Quaternion, Vector
 
 
-DLL_BASENAME = "HedgehogEngineAnimationTools"
+DLLName = "HedgehogEngineAnimationTools"
 ORIENTATION_EULER = (math.radians(90.0), 0.0, 0.0)
 EXPORT_ANIMATION_FPS = 60
 ROOT_ANIM_CORRECTION = Quaternion((0.5, -0.5, -0.5, -0.5))
 ROOT_EXPORT_CORRECTION = Quaternion((0.5, 0.5, 0.5, 0.5))
 ROOT_MOTION_PROP = "heat_root_motion"
+ACTION_FPS_PROP = "heat_action_fps"
 SKELETON_SOURCE_PROP = "heat_skeleton_source_path"
 
 
@@ -35,22 +36,22 @@ class HeatError(RuntimeError):
     pass
 
 
-def _dll_names():
+def dll_names():
     if sys.platform == "win32":
-        platform_name = f"{DLL_BASENAME}.windows.dll"
+        platform_name = f"{DLLName}.windows.dll"
     elif sys.platform == "linux":
-        platform_name = f"{DLL_BASENAME}.linux.dll"
+        platform_name = f"{DLLName}.linux.dll"
     elif sys.platform == "darwin":
-        platform_name = f"{DLL_BASENAME}.macos.dylib"
+        platform_name = f"{DLLName}.macos.dylib"
     else:
-        platform_name = f"{DLL_BASENAME}.dll"
-    return (platform_name, f"{DLL_BASENAME}.dll")
+        platform_name = f"{DLLName}.dll"
+    return (platform_name, f"{DLLName}.dll")
 
 
-def _dll_path():
+def dll_path():
     here = Path(__file__).resolve()
     candidates = []
-    for dll_name in _dll_names():
+    for dll_name in dll_names():
         candidates.extend(
             [
                 here.with_name(dll_name),
@@ -65,15 +66,15 @@ def _dll_path():
             return candidate
 
     checked = "\n".join(str(candidate) for candidate in candidates)
-    raise HeatError(f"{DLL_BASENAME} native library was not found. Checked:\n{checked}")
+    raise HeatError(f"{DLLName} native library was not found. Checked:\n{checked}")
 
 
-def _path_bytes(path):
+def path_bytes(path):
     return os.fsencode(os.fspath(path))
 
 
-def _load_dll():
-    path = _dll_path()
+def load_dll():
+    path = dll_path()
     try:
         dll = ctypes.CDLL(str(path))
     except OSError as ex:
@@ -115,82 +116,82 @@ def _load_dll():
     return dll
 
 
-def _last_error(dll):
+def last_error(dll):
     raw = dll.HEAT_last_error()
     if not raw:
         return "Unknown Hedgehog Engine Animation Tools error"
     return raw.decode("utf-8", errors="replace")
 
 
-def _read_native_json(func, *args):
-    dll = _load_dll()
+def read_native_json(func, *args):
+    dll = load_dll()
     required = ctypes.c_uint32(0)
     ok = func(dll, *args, None, 0, ctypes.byref(required))
     if not ok:
-        raise HeatError(_last_error(dll))
+        raise HeatError(last_error(dll))
 
     buffer = ctypes.create_string_buffer(required.value)
     ok = func(dll, *args, buffer, required.value, ctypes.byref(required))
     if not ok:
-        raise HeatError(_last_error(dll))
+        raise HeatError(last_error(dll))
 
     return json.loads(buffer.value.decode("utf-8"))
 
 
-def _import_skeleton_native(path):
-    return _read_native_json(
+def import_skeleton_native(path):
+    return read_native_json(
         lambda dll, p, out, cap, req: dll.HEAT_import_skeleton(
-            _path_bytes(p), out, cap, req
+            path_bytes(p), out, cap, req
         ),
         path,
     )
 
 
-def _import_animation_native(path, skeleton_path):
-    skeleton_arg = _path_bytes(skeleton_path) if skeleton_path else None
-    return _read_native_json(
+def import_animation_native(path, skeleton_path):
+    skeleton_arg = path_bytes(skeleton_path) if skeleton_path else None
+    return read_native_json(
         lambda dll, p, s, out, cap, req: dll.HEAT_import_animation(
-            _path_bytes(p), s, out, cap, req
+            path_bytes(p), s, out, cap, req
         ),
         path,
         skeleton_arg,
     )
 
 
-def _native_quat(values):
+def native_quat(values):
     return Quaternion((values[3], values[0], values[1], values[2]))
 
 
-def _hk_to_blender_loc(values):
+def hk_to_blender_loc(values):
     return Vector((values[2], values[0], values[1]))
 
 
-def _hk_to_blender_root_motion_loc(values):
+def hk_to_blender_root_motion_loc(values):
     return Vector((values[0], values[1], values[2]))
 
 
-def _hk_to_blender_quat(values, root_animation=False):
+def hk_to_blender_quat(values, root_animation=False):
     quat = Quaternion((values[3], values[2], values[0], values[1]))
     if root_animation:
         quat @= ROOT_ANIM_CORRECTION
     return quat
 
 
-def _hk_to_blender_scale(values):
+def hk_to_blender_scale(values):
     if tuple(values) == (0.0, 0.0, 0.0):
         return Vector((1.0, 1.0, 1.0))
     return Vector((values[2], values[0], values[1]))
 
 
-def _native_matrix(transform):
+def native_matrix(transform):
     return Matrix.LocRotScale(
-        _hk_to_blender_loc(transform["translation"]),
-        _hk_to_blender_quat(transform["rotation"]),
+        hk_to_blender_loc(transform["translation"]),
+        hk_to_blender_quat(transform["rotation"]),
         Vector((1.0, 1.0, 1.0)),
     )
 
 
-def _bone_length(index, globals_, children):
+def bone_length(index, globals_, children):
     head = globals_[index].translation
     for child in children[index]:
         delta = globals_[child].translation - head
@@ -199,8 +200,8 @@ def _bone_length(index, globals_, children):
     return 0.08
 
 
-def _clamped_bone_length(index, globals_, children):
-    length = _bone_length(index, globals_, children)
+def clamped_bone_length(index, globals_, children):
+    length = bone_length(index, globals_, children)
     return max(0.025, min(0.6, length))
 
 
@@ -267,7 +268,7 @@ def find_bone_name(track_name, bone_index, bone_names, pose_lookup):
     )
 
 
-def _skeleton_object_name(data):
+def skeleton_object_name(data):
     bones = data.get("bones") or []
     if bones:
         root = next((bone for bone in bones if bone.get("parent", -1) < 0), bones[0])
@@ -308,19 +309,19 @@ def set_rotation_ui(arm_obj):
     bpy.context.view_layer.update()
 
 
-def _deferset_rotation_ui(arm_obj):
-    def _run():
+def defer_set_rotation_ui(arm_obj):
+    def run_deferred():
         if arm_obj and arm_obj.name in bpy.data.objects:
             set_rotation_ui(arm_obj)
         return None
     try:
-        bpy.app.timers.register(_run, first_interval=0.05)
+        bpy.app.timers.register(run_deferred, first_interval=0.05)
     except Exception:
         pass
 
 
 def create_armature_from_skeleton(data, object_name=None):
-    arm_data = bpy.data.armatures.new(object_name or _skeleton_object_name(data))
+    arm_data = bpy.data.armatures.new(object_name or skeleton_object_name(data))
     arm_obj = bpy.data.objects.new(arm_data.name, arm_data)
     bpy.context.collection.objects.link(arm_obj)
     bpy.ops.object.select_all(action="DESELECT")
@@ -329,7 +330,7 @@ def create_armature_from_skeleton(data, object_name=None):
     set_armature_transform(arm_obj)
 
     bones = data["bones"]
-    local_mats = [_native_matrix(b) for b in bones]
+    local_mats = [native_matrix(b) for b in bones]
     global_mats = [Matrix.Identity(4) for _ in bones]
     children = [[] for _ in bones]
 
@@ -375,13 +376,13 @@ def create_armature_from_skeleton(data, object_name=None):
     bpy.ops.object.mode_set(mode="EDIT")
 
     for i, edit_bone in enumerate(arm_data.edit_bones):
-        edit_bone.length = _clamped_bone_length(i, global_mats, children)
+        edit_bone.length = clamped_bone_length(i, global_mats, children)
         edit_bone.inherit_scale = "ALIGNED"
 
     bpy.ops.object.mode_set(mode="OBJECT")
     set_armature_transform(arm_obj)
     set_rotation_ui(arm_obj)
-    _deferset_rotation_ui(arm_obj)
+    defer_set_rotation_ui(arm_obj)
     arm_data.name = clean_bone_name(arm_data.name) or "HavokSkeleton"
     arm_obj.name = arm_data.name
     arm_data.show_axes = False
@@ -416,14 +417,14 @@ def rest_matrices(arm_obj):
 
 def sample_matrix(sample):
     return Matrix.LocRotScale(
-        _hk_to_blender_loc(sample[0:3]),
-        _hk_to_blender_quat(sample[3:7]),
+        hk_to_blender_loc(sample[0:3]),
+        hk_to_blender_quat(sample[3:7]),
         Vector((1.0, 1.0, 1.0)),
     )
 
 
 def sample_scale(sample):
-    return _hk_to_blender_scale(sample[7:10])
+    return hk_to_blender_scale(sample[7:10])
 
 
 def reference_cancel_loc(values):
@@ -433,13 +434,13 @@ def reference_cancel_loc(values):
 def sample_matrix_for_bone(sample, pose_bone):
     if pose_bone.parent is None:
         return Matrix.LocRotScale(
-            _hk_to_blender_root_motion_loc(sample[0:3]),
-            _hk_to_blender_quat(sample[3:7], root_animation=True),
+            hk_to_blender_root_motion_loc(sample[0:3]),
+            hk_to_blender_quat(sample[3:7], root_animation=True),
             Vector((1.0, 1.0, 1.0)),
         )
     return Matrix.LocRotScale(
-        _hk_to_blender_loc(sample[0:3]),
-        _hk_to_blender_quat(sample[3:7], root_animation=False),
+        hk_to_blender_loc(sample[0:3]),
+        hk_to_blender_quat(sample[3:7], root_animation=False),
         Vector((1.0, 1.0, 1.0)),
     )
 
@@ -593,6 +594,12 @@ def apply_animation_to_armature(data, arm_obj):
 
     fps = max(1, int(data.get("fps", 30)))
     frame_total = max(1, int(data.get("frames", 1)))
+    action[ACTION_FPS_PROP] = float(fps)
+    if hasattr(action, "use_frame_range"):
+        action.use_frame_range = True
+        action.frame_start = 0
+        action.frame_end = frame_total - 1
+
     scene = bpy.context.scene
     scene.frame_start = 0
     scene.frame_end = frame_total - 1
@@ -677,11 +684,11 @@ def apply_animation_to_armature(data, arm_obj):
     scene.frame_set(current_frame if current_frame <= last_frame else 0)
     return action
 
-def _sanitize_text(value):
+def sanitize_text(value):
     return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
-def _matrix_to_native(matrix, is_root=False, root_motion=False):
+def matrix_to_native(matrix, is_root=False, root_motion=False):
     loc, rot, scale = matrix.decompose()
     if is_root:
         rot @= ROOT_EXPORT_CORRECTION
@@ -703,7 +710,7 @@ def _matrix_to_native(matrix, is_root=False, root_motion=False):
     )
 
 
-def _identity_native_values():
+def identity_native_values():
     return (
         0.0,
         0.0,
@@ -722,16 +729,19 @@ def export_root_name(arm_obj):
     return clean_bone_name(arm_obj.name) or clean_bone_name(arm_obj.data.name) or "HavokSkeleton"
 
 
-def export_bones(arm_obj):
-    bones = []
+def export_bones(arm_obj, preserve_order=False):
+    if preserve_order:
+        bones = list(arm_obj.data.bones)
+    else:
+        bones = []
 
-    def visit(bone):
-        bones.append(bone)
-        for child in sorted(bone.children, key=lambda item: item.name.lower()):
-            visit(child)
+        def visit(bone):
+            bones.append(bone)
+            for child in sorted(bone.children, key=lambda item: item.name.lower()):
+                visit(child)
 
-    for root in sorted((bone for bone in arm_obj.data.bones if not bone.parent), key=lambda item: item.name.lower()):
-        visit(root)
+        for root in sorted((bone for bone in arm_obj.data.bones if not bone.parent), key=lambda item: item.name.lower()):
+            visit(root)
 
     entries = []
     index_by_name = {}
@@ -759,16 +769,16 @@ def export_bones(arm_obj):
     return entries
 
 
-def serialize_skeleton(arm_obj):
-    entries = export_bones(arm_obj)
-    lines = [f"skeleton\t{_sanitize_text(export_root_name(arm_obj))}\t{len(entries)}"]
+def serialize_skeleton(arm_obj, preserve_order=False):
+    entries = export_bones(arm_obj, preserve_order=preserve_order)
+    lines = [f"skeleton\t{sanitize_text(export_root_name(arm_obj))}\t{len(entries)}"]
 
     for entry in entries:
-        values = _matrix_to_native(entry["matrix"], entry.get("root_correction", False))
+        values = matrix_to_native(entry["matrix"], entry.get("root_correction", False))
         lines.append(
             "bone\t{}\t{}\t{}".format(
                 entry["parent"],
-                _sanitize_text(clean_bone_name(entry["name"])),
+                sanitize_text(clean_bone_name(entry["name"])),
                 "\t".join(f"{v:.9g}" for v in values),
             )
         )
@@ -816,13 +826,13 @@ def object_root_motion_sample(arm_obj, base_location):
     return (-delta.x, -delta.z, delta.y, 0.0)
 
 
-def serialize_animation(arm_obj):
+def serialize_animation(arm_obj, pxd_main_tracks=False, preserve_bone_order=False):
     action = arm_obj.animation_data.action if arm_obj.animation_data else None
     if not action:
         raise HeatError("The selected armature has no active action")
 
     scene = bpy.context.scene
-    source_fps = max(1, scene.render.fps)
+    source_fps = max(1.0, scene.render.fps / scene.render.fps_base)
     fps = EXPORT_ANIMATION_FPS
     start, end = action.frame_range
     start = int(math.floor(start))
@@ -831,7 +841,7 @@ def serialize_animation(arm_obj):
     duration = source_frames / source_fps
     frame_count = max(1, int(round(duration * fps)) + 1)
 
-    entries = export_bones(arm_obj)
+    entries = export_bones(arm_obj, preserve_order=preserve_bone_order)
     lines = [f"animation\t{fps}\t{duration:.9g}\t{frame_count}"]
     root_motion = None
     if ROOT_MOTION_PROP in action:
@@ -877,7 +887,7 @@ def serialize_animation(arm_obj):
                 )
             )
     for i, entry in enumerate(entries):
-        lines.append(f"track\t{i}\t{_sanitize_text(clean_bone_name(entry['name']))}")
+        lines.append(f"track\t{i}\t{sanitize_text(clean_bone_name(entry['name']))}")
 
     current_frame = scene.frame_current
     current_subframe = scene.frame_subframe
@@ -897,13 +907,13 @@ def serialize_animation(arm_obj):
             for i, entry in enumerate(entries):
                 bone = entry["bone"]
                 if bone is None:
-                    values = _identity_native_values()
+                    values = identity_native_values()
                 else:
                     pb = arm_obj.pose.bones[bone.name]
-                    values = _matrix_to_native(
+                    values = matrix_to_native(
                         pose_local_matrix(pb),
                         entry.get("root_correction", False),
-                        root_motion=True,
+                        root_motion=not pxd_main_tracks,
                     )
                     if i == derived_root_motion_index:
                         derived_root_sample = (
@@ -931,28 +941,28 @@ def serialize_animation(arm_obj):
 
 
 def export_skeleton_native(filepath, skeleton_text, preset):
-    dll = _load_dll()
+    dll = load_dll()
     ok = dll.HEAT_export_skeleton(
-        _path_bytes(filepath), skeleton_text.encode("utf-8"), int(preset)
+        path_bytes(filepath), skeleton_text.encode("utf-8"), int(preset)
     )
     if not ok:
-        raise HeatError(_last_error(dll))
+        raise HeatError(last_error(dll))
 
 
 def export_animation_native(filepath, skeleton_text, animation_text, preset):
-    dll = _load_dll()
+    dll = load_dll()
     ok = dll.HEAT_export_animation(
-        _path_bytes(filepath),
+        path_bytes(filepath),
         skeleton_text.encode("utf-8"),
         animation_text.encode("utf-8"),
         int(preset),
     )
     if not ok:
-        raise HeatError(_last_error(dll))
+        raise HeatError(last_error(dll))
 
 
 def export_compressed_animation_native(filepath, skeleton_text, animation_text, preset):
-    dll = _load_dll()
+    dll = load_dll()
     export_func = dll.HEAT_export_compressed_animation
     export_func.argtypes = [
         ctypes.c_char_p,
@@ -962,13 +972,13 @@ def export_compressed_animation_native(filepath, skeleton_text, animation_text, 
     ]
     export_func.restype = ctypes.c_int
     ok = export_func(
-        _path_bytes(filepath),
+        path_bytes(filepath),
         skeleton_text.encode("utf-8"),
         animation_text.encode("utf-8"),
         int(preset),
     )
     if not ok:
-        raise HeatError(_last_error(dll))
+        raise HeatError(last_error(dll))
 
 
 PRESETS = (
@@ -1002,6 +1012,43 @@ def export_preset(game, generations="pc", unleashed="360", lost_world="pc"):
     return {"360": 1, "ps3": 4}.get(unleashed, 1)
 
 
+def action_export_name(name):
+    name = str(name or "")
+    if "|" in name:
+        name = name.rsplit("|", 1)[1]
+    return name.strip()
+
+
+def safe_action_filename(name):
+    name = action_export_name(name)
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(name or "")).strip(" .")
+    return name or "Action"
+
+
+def default_output_directory():
+    if bpy.data.filepath:
+        return os.path.dirname(bpy.data.filepath)
+    return os.path.expanduser("~")
+
+
+def action_export_filepath(context, extension):
+    arm_obj = selected_armature()
+    action = arm_obj.animation_data.action if arm_obj and arm_obj.animation_data else None
+    name = safe_action_filename(action.name if action else "Animation")
+    if not name.lower().endswith(extension.lower()):
+        name += extension
+    return os.path.join(default_output_directory(), name)
+
+
+def export_hkx_animation_file(filepath, arm_obj, preset, compress=False):
+    skeleton = serialize_skeleton(arm_obj)
+    animation = serialize_animation(arm_obj)
+    if compress:
+        export_compressed_animation_native(filepath, skeleton, animation, preset)
+    else:
+        export_animation_native(filepath, skeleton, animation, preset)
+
+
 class HEAT_OT_import_skeleton(bpy.types.Operator, ImportHelper):
     bl_idname = "heat.import_skeleton"
     bl_label = "Havok Skeleton (.skl.hkx)"
@@ -1011,10 +1058,10 @@ class HEAT_OT_import_skeleton(bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         try:
-            data = _import_skeleton_native(self.filepath)
+            data = import_skeleton_native(self.filepath)
             fallback_name = clean_file_name(Path(self.filepath).name)
             arm_obj = create_armature_from_skeleton(data, fallback_name)
-            clean_name = _skeleton_object_name(data) or fallback_name or "HavokSkeleton"
+            clean_name = skeleton_object_name(data) or fallback_name or "HavokSkeleton"
             clean_name = clean_file_name(clean_name)
             arm_obj.name = clean_name
             arm_obj.data.name = clean_name
@@ -1040,7 +1087,7 @@ class HEAT_OT_import_animation(bpy.types.Operator, ImportHelper):
             skeleton_path = arm_obj.get(SKELETON_SOURCE_PROP, "")
             if skeleton_path and not Path(skeleton_path).exists():
                 skeleton_path = ""
-            data = _import_animation_native(self.filepath, skeleton_path or None)
+            data = import_animation_native(self.filepath, skeleton_path or None)
             apply_animation_to_armature(data, arm_obj)
         except Exception as ex:
             self.report({"ERROR"}, str(ex))
@@ -1093,6 +1140,12 @@ class HEAT_OT_export_animation(bpy.types.Operator, ExportHelper):
     lost_world: EnumProperty(name="Platform", items=LOST_WORLD_PLATFORMS, default="pc")
     compress: BoolProperty(name="Compress Animation", default=False)
 
+    def invoke(self, context, event):
+        if not self.filepath:
+            self.filepath = action_export_filepath(context, self.filename_ext)
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
     def draw(self, context):
         self.layout.prop(self, "preset")
         if self.preset == "0":
@@ -1108,18 +1161,12 @@ class HEAT_OT_export_animation(bpy.types.Operator, ExportHelper):
             arm_obj = selected_armature()
             if not arm_obj:
                 raise HeatError("Select an armature before exporting an animation")
-            skeleton = serialize_skeleton(arm_obj)
-            animation = serialize_animation(arm_obj)
             preset = export_preset(self.preset, self.generations, self.unleashed, self.lost_world)
-            if self.compress:
-                export_compressed_animation_native(self.filepath, skeleton, animation, preset)
-            else:
-                export_animation_native(self.filepath, skeleton, animation, preset)
+            export_hkx_animation_file(self.filepath, arm_obj, preset, self.compress)
         except Exception as ex:
             self.report({"ERROR"}, str(ex))
             return {"CANCELLED"}
         return {"FINISHED"}
-
 
 
 class HEAT_MT_import(bpy.types.Menu):
@@ -1129,6 +1176,8 @@ class HEAT_MT_import(bpy.types.Menu):
     def draw(self, context):
         self.layout.operator(HEAT_OT_import_skeleton.bl_idname, text="Havok Skeleton (.skl.hkx)")
         self.layout.operator(HEAT_OT_import_animation.bl_idname, text="Havok Animation (.anm.hkx)")
+        self.layout.separator()
+        pxd.draw_import_menu(self.layout)
 
 
 class HEAT_MT_export(bpy.types.Menu):
@@ -1138,13 +1187,15 @@ class HEAT_MT_export(bpy.types.Menu):
     def draw(self, context):
         self.layout.operator(HEAT_OT_export_skeleton.bl_idname, text="Havok Skeleton (.skl.hkx)")
         self.layout.operator(HEAT_OT_export_animation.bl_idname, text="Havok Animation (.anm.hkx)")
+        self.layout.separator()
+        pxd.draw_export_menu(self.layout)
 
 
-def _import_menu(self, context):
+def import_menu(self, context):
     self.layout.menu(HEAT_MT_import.bl_idname)
 
 
-def _export_menu(self, context):
+def export_menu(self, context):
     self.layout.menu(HEAT_MT_export.bl_idname)
 
 
@@ -1157,18 +1208,24 @@ CLASSES = (
     HEAT_MT_export,
 )
 
+from . import pxd
+
+# Batch exporting is not possible, and never will come to this addon.
+
 
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
-    bpy.types.TOPBAR_MT_file_import.append(_import_menu)
-    bpy.types.TOPBAR_MT_file_export.append(_export_menu)
+    bpy.types.TOPBAR_MT_file_import.append(import_menu)
+    bpy.types.TOPBAR_MT_file_export.append(export_menu)
     bpy.types.Scene.heat_last_animation_path = StringProperty(options={"HIDDEN"}, default="")
+    pxd.register()
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_export.remove(_export_menu)
-    bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
+    pxd.unregister()
+    bpy.types.TOPBAR_MT_file_export.remove(export_menu)
+    bpy.types.TOPBAR_MT_file_import.remove(import_menu)
     del bpy.types.Scene.heat_last_animation_path
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

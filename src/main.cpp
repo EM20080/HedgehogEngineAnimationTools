@@ -9,6 +9,7 @@
 #include "internal/hka_deltaanimation.hpp"
 #include "internal/hka_interleavedanimation.hpp"
 #include "internal/hka_splineanimation.hpp"
+#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -30,6 +31,8 @@
 #endif
 
 namespace {
+
+using json = nlohmann::json;
 
 thread_local std::string g_lastError;
 
@@ -114,49 +117,39 @@ template <class Fn> int Guard(Fn &&fn) {
   return fn();
 }
 
-void AppendVector(std::string &out, const Vector4A16 &v, int count) {
-  out += '[';
-  out += std::to_string(v.X);
+json VectorJson(const Vector4A16 &v, int count) {
+  json out = json::array();
+  out.push_back(v.X);
   if (count > 1) {
-    out += ',';
-    out += std::to_string(v.Y);
+    out.push_back(v.Y);
   }
   if (count > 2) {
-    out += ',';
-    out += std::to_string(v.Z);
+        out.push_back(v.Z);
   }
   if (count > 3) {
-    out += ',';
-    out += std::to_string(v.W);
+    out.push_back(v.W);
   }
-  out += ']';
+  return out;
 }
 
-void AppendRootMotionJson(
-    std::string &out,
+json RootMotionJson(
     const hkaAnimatedReferenceFrameInternalInterface *motion) {
   if (!motion) {
-    return;
+    return nullptr;
   }
 
-  out += ",\"rootMotion\":{";
-  out += "\"duration\":";
-  out += std::to_string(motion->GetDuration());
-  out += ",\"up\":";
-  AppendVector(out, motion->GetUp(), 4);
-  out += ",\"forward\":";
-  AppendVector(out, motion->GetForward(), 4);
-  out += ",\"samples\":[";
+  json rootMotion;
+  rootMotion["duration"] = motion->GetDuration();
+  rootMotion["up"] = VectorJson(motion->GetUp(), 4);
+  rootMotion["forward"] = VectorJson(motion->GetForward(), 4);
+  rootMotion["samples"] = json::array();
 
   const size_t numFrames = motion->GetNumFrames();
   for (size_t i = 0; i < numFrames; ++i) {
-    if (i) {
-      out += ',';
-    }
-    AppendVector(out, motion->GetRefFrame(i), 4);
+    rootMotion["samples"].push_back(VectorJson(motion->GetRefFrame(i), 4));
   }
 
-  out += "]}";
+  return rootMotion;
 }
 
 int CopyResult(const std::string &payload, char *out, uint32_t capacity,
@@ -206,31 +199,23 @@ const hkaAnimationContainer *FindContainer(IhkPackFile &pack) {
 }
 
 std::string SkeletonToJson(const hkaSkeleton &skeleton) {
-  std::string out = "{\"type\":\"skeleton\",\"name\":\"";
-  out += skeleton.Name();
-  out += "\",\"bones\":[";
+  json root;
+  root["type"] = "skeleton";
+  root["name"] = skeleton.Name();
+  root["bones"] = json::array();
 
   for (size_t i = 0; i < skeleton.GetNumBones(); ++i) {
     const hkQTransform *tm = skeleton.GetBoneTM(i);
-    if (i) {
-      out += ',';
-    }
-
-    out += "{\"name\":\"";
-    out += skeleton.GetBoneName(i);
-    out += "\",\"parent\":";
-    out += std::to_string(skeleton.GetBoneParentID(i));
-    out += ",\"translation\":";
-    AppendVector(out, tm->translation, 3);
-    out += ",\"rotation\":";
-    AppendVector(out, tm->rotation, 4);
-    out += ",\"scale\":";
-    AppendVector(out, tm->scale, 3);
-    out += '}';
+    root["bones"].push_back({
+        {"name", skeleton.GetBoneName(i)},
+        {"parent", skeleton.GetBoneParentID(i)},
+        {"translation", VectorJson(tm->translation, 3)},
+        {"rotation", VectorJson(tm->rotation, 4)},
+        {"scale", VectorJson(tm->scale, 3)},
+    });
   }
 
-  out += "]}";
-  return out;
+  return root.dump();
 }
 
 const hkaAnimationBinding *FindBindingForAnimation(const hkaAnimationContainer &c,
@@ -405,15 +390,18 @@ std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) 
       container ? FindBindingForAnimation(*container, animation) : nullptr;
   const auto trackMap = BuildTrackMap(*animation, binding, skeleton);
 
-  std::string out = "{\"type\":\"animation\",\"duration\":";
-  out += std::to_string(duration);
-  out += ",\"fps\":";
-  out += std::to_string(fps);
-  out += ",\"frames\":";
-  out += std::to_string(frameCount);
-  AppendRootMotionJson(
-      out, dynamic_cast<const hkaAnimatedReferenceFrameInternalInterface *>(
-               animation->GetExtractedMotion()));
+  json root;
+  root["type"] = "animation";
+  root["duration"] = duration;
+  root["fps"] = fps;
+  root["frames"] = frameCount;
+  if (json rootMotion = RootMotionJson(
+          dynamic_cast<const hkaAnimatedReferenceFrameInternalInterface *>(
+              animation->GetExtractedMotion()));
+      !rootMotion.is_null()) {
+    root["rootMotion"] = std::move(rootMotion);
+  }
+
   const size_t outputTrackCount =
       skeleton ? skeleton->GetNumBones() : animation->GetNumOfTransformTracks();
   std::vector<std::vector<uni::RTSValue>> sampledFrames(
@@ -451,52 +439,35 @@ std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) 
     }
   }
 
-  out += ",\"tracks\":[";
+  root["tracks"] = json::array();
 
   for (size_t track = 0; track < outputTrackCount; ++track) {
-    if (track) {
-      out += ',';
-    }
-
     const int16 boneIndex = static_cast<int16>(track);
-    out += "{\"bone\":";
-    out += std::to_string(boneIndex);
-    out += ",\"name\":\"";
+    json trackJson;
+    trackJson["bone"] = boneIndex;
+    trackJson["name"] = "";
     if (skeleton && boneIndex >= 0 &&
         static_cast<size_t>(boneIndex) < skeleton->GetNumBones()) {
-      out += skeleton->GetBoneName(static_cast<size_t>(boneIndex));
+      trackJson["name"] = skeleton->GetBoneName(static_cast<size_t>(boneIndex));
     } else if (track < animation->GetNumAnnotations()) {
       auto annot = animation->GetAnnotation(track);
       if (annot) {
-        out += annot->GetName();
+        trackJson["name"] = annot->GetName();
       }
     }
-    out += "\",\"samples\":[";
+    trackJson["samples"] = json::array();
 
     for (uint32_t frame = 0; frame < frameCount; ++frame) {
-      if (frame) {
-        out += ',';
-      }
-
       const uni::RTSValue &value = sampledFrames[frame][track];
-      out += '[';
-      out += std::to_string(value.translation.X) + "," +
-             std::to_string(value.translation.Y) + "," +
-             std::to_string(value.translation.Z) + ",";
-      out += std::to_string(value.rotation.X) + "," +
-             std::to_string(value.rotation.Y) + "," +
-             std::to_string(value.rotation.Z) + "," +
-             std::to_string(value.rotation.W) + ",";
-      out += std::to_string(value.scale.X) + "," + std::to_string(value.scale.Y) +
-             "," + std::to_string(value.scale.Z);
-      out += ']';
+      trackJson["samples"].push_back(
+          {value.translation.X, value.translation.Y, value.translation.Z,
+           value.rotation.X, value.rotation.Y, value.rotation.Z, value.rotation.W,
+           value.scale.X, value.scale.Y, value.scale.Z});
     }
-
-    out += "]}";
+    root["tracks"].push_back(std::move(trackJson));
   }
 
-  out += "]}";
-  return out;
+  return root.dump();
 }
 
 std::vector<std::string_view> SplitTabs(std::string_view line) {

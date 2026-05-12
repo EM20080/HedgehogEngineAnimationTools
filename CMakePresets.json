@@ -10,8 +10,23 @@
       "displayName": "Windows x64 Release",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "binaryDir": "${sourceDir}/out/build/temp/windows",
       "cacheVariables": {}
+    },
+    {
+      "name": "linux-x64-release",
+      "displayName": "Linux x64 Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/temp/linux",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/toolchains/linux-gcc.cmake"
+      }
     }
   ],
   "buildPresets": [
@@ -20,13 +35,19 @@
       "configurePreset": "windows-x64-release",
       "configuration": "Release",
       "targets": [
+        "package_addon"
+      ]
+    },
+    {
+      "name": "linux-x64-release",
+      "configurePreset": "linux-x64-release",
+      "targets": [
         "HedgehogEngineAnimationTools"
       ]
     },
     {
-      "name": "windows-x64-release-package",
-      "configurePreset": "windows-x64-release",
-      "configuration": "Release",
+      "name": "linux-x64-release-package",
+      "configurePreset": "linux-x64-release",
       "targets": [
         "package_addon"
       ]
