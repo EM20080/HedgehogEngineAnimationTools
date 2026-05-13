@@ -132,6 +132,25 @@ json VectorJson(const Vector4A16 &v, int count) {
   return out;
 }
 
+bool AlmostEqual(float lhs, float rhs) {
+  return std::fabs(lhs - rhs) <= 0.0001f;
+}
+
+Vector4A16 ScaleForImportJson(const Vector4A16 &scale) {
+  if (!AlmostEqual(scale.X, scale.Y) || !AlmostEqual(scale.X, scale.Z)) {
+    return scale;
+  }
+
+  if (AlmostEqual(scale.X, 1.0f)) {
+    return scale;
+  }
+
+  Vector4A16 out = scale;
+  out.Y = 1.0f;
+  out.Z = 1.0f;
+  return out;
+}
+
 json RootMotionJson(
     const hkaAnimatedReferenceFrameInternalInterface *motion) {
   if (!motion) {
@@ -459,10 +478,11 @@ std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) 
 
     for (uint32_t frame = 0; frame < frameCount; ++frame) {
       const uni::RTSValue &value = sampledFrames[frame][track];
+      const Vector4A16 scale = ScaleForImportJson(value.scale);
       trackJson["samples"].push_back(
           {value.translation.X, value.translation.Y, value.translation.Z,
            value.rotation.X, value.rotation.Y, value.rotation.Z, value.rotation.W,
-           value.scale.X, value.scale.Y, value.scale.Z});
+           scale.X, scale.Y, scale.Z});
     }
     root["tracks"].push_back(std::move(trackJson));
   }
