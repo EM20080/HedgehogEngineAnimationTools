@@ -4,16 +4,13 @@
 #include "hklib/hka_animationcontainer.hpp"
 #include "hklib/hka_annotationtrack.hpp"
 #include "hklib/hka_skeleton.hpp"
-#include "internal/hka_animatedreferenceframe.hpp"
 #include "internal/hka_animation.hpp"
 #include "internal/hka_deltaanimation.hpp"
 #include "internal/hka_interleavedanimation.hpp"
 #include "internal/hka_splineanimation.hpp"
-#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <charconv>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -31,8 +28,6 @@
 #endif
 
 namespace {
-
-using json = nlohmann::json;
 
 thread_local std::string g_lastError;
 
@@ -61,6 +56,25 @@ struct Binding : hkaAnimationBindingInternalInterface {
 struct Preset {
   hkToolset toolset;
   uint32 rule;
+};
+
+struct SkeletonImport {
+  IhkPackFile::Ptr pack;
+  const hkaSkeleton *skeleton = nullptr;
+};
+
+struct AnimationImport {
+  IhkPackFile::Ptr animPack;
+  IhkPackFile::Ptr skeletonPack;
+  const hkaSkeleton *skeleton = nullptr;
+  const hkaAnimationContainer *container = nullptr;
+  const hkaAnimation *animation = nullptr;
+  const hkaAnimationInternalInterface *internal = nullptr;
+  std::vector<int16> trackMap;
+  float duration = 0.0f;
+  uint32_t fps = 30;
+  size_t frameCount = 1;
+  size_t outputTrackCount = 0;
 };
 
 enum GameType {
@@ -112,31 +126,22 @@ hkaSplineCompressionSettings GetSplineSettings(int preset) {
 
 void SetError(std::string message) { g_lastError = std::move(message); }
 
+const char *TempString(std::string_view value) {
+  thread_local std::string temp;
+  temp.assign(value);
+  return temp.c_str();
+}
+
 template <class Fn> int Guard(Fn &&fn) {
   g_lastError.clear();
   return fn();
-}
-
-json VectorJson(const Vector4A16 &v, int count) {
-  json out = json::array();
-  out.push_back(v.X);
-  if (count > 1) {
-    out.push_back(v.Y);
-  }
-  if (count > 2) {
-        out.push_back(v.Z);
-  }
-  if (count > 3) {
-    out.push_back(v.W);
-  }
-  return out;
 }
 
 bool AlmostEqual(float lhs, float rhs) {
   return std::fabs(lhs - rhs) <= 0.0001f;
 }
 
-Vector4A16 ScaleForImportJson(const Vector4A16 &scale) {
+Vector4A16 ScaleForImport(const Vector4A16 &scale) {
   if (!AlmostEqual(scale.X, scale.Y) || !AlmostEqual(scale.X, scale.Z)) {
     return scale;
   }
@@ -151,45 +156,25 @@ Vector4A16 ScaleForImportJson(const Vector4A16 &scale) {
   return out;
 }
 
-json RootMotionJson(
-    const hkaAnimatedReferenceFrameInternalInterface *motion) {
-  if (!motion) {
-    return nullptr;
+void CopyVector(const Vector4A16 &v, float *out, int count) {
+  if (count > 0) {
+    out[0] = v.X;
   }
-
-  json rootMotion;
-  rootMotion["duration"] = motion->GetDuration();
-  rootMotion["up"] = VectorJson(motion->GetUp(), 4);
-  rootMotion["forward"] = VectorJson(motion->GetForward(), 4);
-  rootMotion["samples"] = json::array();
-
-  const size_t numFrames = motion->GetNumFrames();
-  for (size_t i = 0; i < numFrames; ++i) {
-    rootMotion["samples"].push_back(VectorJson(motion->GetRefFrame(i), 4));
+  if (count > 1) {
+    out[1] = v.Y;
   }
-
-  return rootMotion;
+  if (count > 2) {
+    out[2] = v.Z;
+  }
+  if (count > 3) {
+    out[3] = v.W;
+  }
 }
 
-int CopyResult(const std::string &payload, char *out, uint32_t capacity,
-               uint32_t *required) {
-  const auto need = static_cast<uint32_t>(payload.size() + 1);
-  if (required) {
-    *required = need;
-  }
-
-  if (!out || capacity == 0) {
-    return 1;
-  }
-
-  if (capacity < need) {
-    SetError("Output buffer is too small");
-    return 0;
-  }
-
-  std::copy(payload.begin(), payload.end(), out);
-  out[payload.size()] = '\0';
-  return 1;
+void CopyTransform(const uni::RTSValue &value, float *out) {
+  CopyVector(value.translation, out, 3);
+  CopyVector(value.rotation, out + 3, 4);
+  CopyVector(ScaleForImport(value.scale), out + 7, 3);
 }
 
 template <class T> const T *FirstClass(IhkPackFile &pack, JenHash hash) {
@@ -217,26 +202,6 @@ const hkaAnimationContainer *FindContainer(IhkPackFile &pack) {
   return FirstClass<hkaAnimationContainer>(pack, hkaAnimationContainer::GetHash());
 }
 
-std::string SkeletonToJson(const hkaSkeleton &skeleton) {
-  json root;
-  root["type"] = "skeleton";
-  root["name"] = skeleton.Name();
-  root["bones"] = json::array();
-
-  for (size_t i = 0; i < skeleton.GetNumBones(); ++i) {
-    const hkQTransform *tm = skeleton.GetBoneTM(i);
-    root["bones"].push_back({
-        {"name", skeleton.GetBoneName(i)},
-        {"parent", skeleton.GetBoneParentID(i)},
-        {"translation", VectorJson(tm->translation, 3)},
-        {"rotation", VectorJson(tm->rotation, 4)},
-        {"scale", VectorJson(tm->scale, 3)},
-    });
-  }
-
-  return root.dump();
-}
-
 const hkaAnimationBinding *FindBindingForAnimation(const hkaAnimationContainer &c,
                                                   const hkaAnimation *anim) {
   for (size_t i = 0; i < c.GetNumBindings(); ++i) {
@@ -249,65 +214,54 @@ const hkaAnimationBinding *FindBindingForAnimation(const hkaAnimationContainer &
   return nullptr;
 }
 
-std::string NormalizeBoneName(std::string_view name) {
-  std::string out{name};
-  const size_t lt = out.size() >= 3 ? out.size() - 3 : std::string::npos;
-  if (lt != std::string::npos && out.substr(lt) == "@LT") {
-    out.resize(lt);
-  }
-
-  for (char &ch : out) {
-    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-  }
-
-  return out;
-}
-
 std::vector<int16> BuildTrackMap(const hkaAnimation &anim,
                                  const hkaAnimationBinding *binding,
                                  const hkaSkeleton *skeleton) {
   const size_t numTracks = anim.GetNumOfTransformTracks();
   std::vector<int16> map(numTracks, -1);
+  std::unordered_map<std::string, int16> boneNameToIndex;
+  int16 rootBoneIndex = -1;
 
-  if (binding && binding->GetNumTransformTrackToBoneIndices()) {
-    const size_t count =
-        std::min(numTracks, binding->GetNumTransformTrackToBoneIndices());
-    for (size_t i = 0; i < count; ++i) {
-      map[i] = binding->GetTransformTrackToBoneIndex(i);
+  if (skeleton) {
+    boneNameToIndex.reserve(skeleton->GetNumBones());
+    for (size_t bone = 0; bone < skeleton->GetNumBones(); ++bone) {
+      std::string name{skeleton->GetBoneName(bone)};
+      if (!name.empty() && boneNameToIndex.find(name) == boneNameToIndex.end()) {
+        boneNameToIndex.emplace(std::move(name), static_cast<int16>(bone));
+      }
+      if (skeleton->GetBoneParentID(bone) < 0) {
+        rootBoneIndex = static_cast<int16>(bone);
+      }
     }
-    return map;
   }
 
-  if (skeleton && anim.GetNumAnnotations() == numTracks) {
-    std::unordered_map<std::string, int16> bones;
-    bones.reserve(skeleton->GetNumBones());
+  for (size_t track = 0; track < numTracks; ++track) {
+    if (track < anim.GetNumAnnotations()) {
+      if (auto annot = anim.GetAnnotation(track)) {
+        std::string trackName{annot->GetName()};
 
-    for (size_t bone = 0; bone < skeleton->GetNumBones(); ++bone) {
-      std::string name = NormalizeBoneName(skeleton->GetBoneName(bone));
-      if (!name.empty() && bones.find(name) == bones.end()) {
-        bones.emplace(std::move(name), static_cast<int16>(bone));
+        const auto it = boneNameToIndex.find(trackName);
+        if (it != boneNameToIndex.end()) {
+          map[track] = it->second;
+          continue;
+        }
+
+        if (trackName == "Root" && rootBoneIndex >= 0) {
+          map[track] = rootBoneIndex;
+          continue;
+        }
       }
     }
 
-    for (size_t track = 0; track < numTracks; ++track) {
-      auto annot = anim.GetAnnotation(track);
-      if (!annot) {
+    if (binding && track < binding->GetNumTransformTrackToBoneIndices()) {
+      const int16 mapped = binding->GetTransformTrackToBoneIndex(track);
+      if (mapped >= 0) {
+        map[track] = mapped;
         continue;
       }
-
-      const auto it = bones.find(NormalizeBoneName(annot->GetName()));
-      if (it != bones.end()) {
-        map[track] = it->second;
-      }
     }
 
-    if (std::any_of(map.begin(), map.end(), [](int16 item) { return item >= 0; })) {
-      return map;
-    }
-  }
-
-  for (size_t i = 0; i < numTracks; ++i) {
-    map[i] = static_cast<int16>(i);
+    map[track] = static_cast<int16>(track);
   }
 
   return map;
@@ -354,140 +308,6 @@ size_t AnimationFrameCount(const hkaAnimation *animation) {
                               static_cast<float>(frameRate))) +
                    1
              : 0;
-}
-
-std::string AnimationToJson(IhkPackFile &animPack, const hkaSkeleton *skeleton) {
-  const hkaAnimationContainer *container = FindContainer(animPack);
-  const hkaAnimation *animation = nullptr;
-
-  if (container && container->GetNumAnimations()) {
-    animation = container->GetAnimation(0);
-    if (!skeleton && container->GetNumSkeletons()) {
-      skeleton = container->GetSkeleton(0);
-    }
-  }
-
-  if (!animation) {
-    animation = FirstClass<hkaAnimation>(animPack, hkaAnimation::GetHash());
-  }
-
-  if (!animation) {
-    SetError("No hkaAnimation was found");
-    return {};
-  }
-
-  if (skeleton) {
-    const_cast<hkaAnimation *>(animation)->SetReferenceSkeleton(skeleton);
-  }
-
-  const auto *internal =
-      dynamic_cast<const hkaAnimationInternalInterface *>(animation);
-  if (!internal) {
-    SetError("Unexpected error, report to developer(s).");
-    return {};
-  }
-
-  const size_t sourceFrameCount = AnimationFrameCount(animation);
-  const float duration = animation->Duration();
-  uint32_t fps = animation->FrameRate();
-  if (!fps && duration > 0.0f && sourceFrameCount > 1) {
-    fps = static_cast<uint32_t>(
-        std::round(static_cast<float>(sourceFrameCount - 1) / duration));
-  }
-  if (!fps) {
-    fps = 30;
-  }
-
-  size_t frameCount =
-      std::max<size_t>(1, static_cast<size_t>(duration * fps + 0.5f) + 1);
-
-  if (frameCount <= 1 && sourceFrameCount > 1) {
-    frameCount = sourceFrameCount;
-  }
-
-  const auto *binding =
-      container ? FindBindingForAnimation(*container, animation) : nullptr;
-  const auto trackMap = BuildTrackMap(*animation, binding, skeleton);
-
-  json root;
-  root["type"] = "animation";
-  root["duration"] = duration;
-  root["fps"] = fps;
-  root["frames"] = frameCount;
-  if (json rootMotion = RootMotionJson(
-          dynamic_cast<const hkaAnimatedReferenceFrameInternalInterface *>(
-              animation->GetExtractedMotion()));
-      !rootMotion.is_null()) {
-    root["rootMotion"] = std::move(rootMotion);
-  }
-
-  const size_t outputTrackCount =
-      skeleton ? skeleton->GetNumBones() : animation->GetNumOfTransformTracks();
-  std::vector<std::vector<uni::RTSValue>> sampledFrames(
-      frameCount, std::vector<uni::RTSValue>(outputTrackCount));
-
-  for (uint32_t frame = 0; frame < frameCount; ++frame) {
-    auto &sampled = sampledFrames[frame];
-
-    for (size_t bone = 0; bone < outputTrackCount; ++bone) {
-      if (skeleton) {
-        if (const hkQTransform *ref = skeleton->GetBoneTM(bone)) {
-          sampled[bone] =
-              uni::RTSValue(ref->translation, ref->rotation, ref->scale);
-        } else {
-          sampled[bone] = uni::RTSValue();
-        }
-      } else {
-        sampled[bone] = uni::RTSValue();
-      }
-    }
-
-    const float time = frame / static_cast<float>(fps);
-    const size_t trackCount = animation->GetNumOfTransformTracks();
-    for (size_t track = 0; track < trackCount; ++track) {
-      size_t boneIndex = track;
-      if (track < trackMap.size() && trackMap[track] >= 0) {
-        boneIndex = static_cast<size_t>(trackMap[track]);
-      }
-
-      if (boneIndex >= sampled.size()) {
-        continue;
-      }
-
-      internal->GetValue(sampled[boneIndex], time, track);
-    }
-  }
-
-  root["tracks"] = json::array();
-
-  for (size_t track = 0; track < outputTrackCount; ++track) {
-    const int16 boneIndex = static_cast<int16>(track);
-    json trackJson;
-    trackJson["bone"] = boneIndex;
-    trackJson["name"] = "";
-    if (skeleton && boneIndex >= 0 &&
-        static_cast<size_t>(boneIndex) < skeleton->GetNumBones()) {
-      trackJson["name"] = skeleton->GetBoneName(static_cast<size_t>(boneIndex));
-    } else if (track < animation->GetNumAnnotations()) {
-      auto annot = animation->GetAnnotation(track);
-      if (annot) {
-        trackJson["name"] = annot->GetName();
-      }
-    }
-    trackJson["samples"] = json::array();
-
-    for (uint32_t frame = 0; frame < frameCount; ++frame) {
-      const uni::RTSValue &value = sampledFrames[frame][track];
-      const Vector4A16 scale = ScaleForImportJson(value.scale);
-      trackJson["samples"].push_back(
-          {value.translation.X, value.translation.Y, value.translation.Z,
-           value.rotation.X, value.rotation.Y, value.rotation.Z, value.rotation.W,
-           scale.X, scale.Y, scale.Z});
-    }
-    root["tracks"].push_back(std::move(trackJson));
-  }
-
-  return root.dump();
 }
 
 std::vector<std::string_view> SplitTabs(std::string_view line) {
@@ -807,60 +627,258 @@ int ExportAnimation(const char *path, const char *skeletonText,
   return 1;
 }
 
+int OpenSkeleton(const char *path, SkeletonImport **out) {
+  if (!path || !out) {
+    SetError("Missing skeleton path or output handle");
+    return 0;
+  }
+
+  auto import = std::make_unique<SkeletonImport>();
+  import->pack = IhkPackFile::Create(path);
+  import->skeleton = FindSkeleton(*import->pack);
+  if (!import->skeleton) {
+    SetError("No hkaSkeleton was found");
+    return 0;
+  }
+
+  *out = import.release();
+  return 1;
+}
+
+int OpenAnimation(const char *animationPath, const char *skeletonPath,
+                  AnimationImport **out) {
+  if (!animationPath || !out) {
+    SetError("Missing animation path or output handle");
+    return 0;
+  }
+
+  auto import = std::make_unique<AnimationImport>();
+  import->animPack = IhkPackFile::Create(animationPath);
+
+  if (skeletonPath && skeletonPath[0]) {
+    import->skeletonPack = IhkPackFile::Create(skeletonPath);
+    import->skeleton = FindSkeleton(*import->skeletonPack);
+  }
+
+  import->container = FindContainer(*import->animPack);
+  if (import->container && import->container->GetNumAnimations()) {
+    import->animation = import->container->GetAnimation(0);
+    if (!import->skeleton && import->container->GetNumSkeletons()) {
+      import->skeleton = import->container->GetSkeleton(0);
+    }
+  }
+
+  if (!import->animation) {
+    import->animation =
+        FirstClass<hkaAnimation>(*import->animPack, hkaAnimation::GetHash());
+  }
+
+  if (!import->animation) {
+    SetError("No hkaAnimation was found");
+    return 0;
+  }
+
+  if (!import->skeleton) {
+    import->skeleton = FindSkeleton(*import->animPack);
+  }
+
+  if (import->skeleton) {
+    const_cast<hkaAnimation *>(import->animation)
+        ->SetReferenceSkeleton(import->skeleton);
+  }
+
+  import->internal =
+      dynamic_cast<const hkaAnimationInternalInterface *>(import->animation);
+  if (!import->internal) {
+    SetError("Unexpected error, report to developer(s).");
+    return 0;
+  }
+
+  const size_t sourceFrameCount = AnimationFrameCount(import->animation);
+  import->duration = import->animation->Duration();
+  import->fps = import->animation->FrameRate();
+  if (!import->fps && import->duration > 0.0f && sourceFrameCount > 1) {
+    import->fps = static_cast<uint32_t>(
+        std::round(static_cast<float>(sourceFrameCount - 1) / import->duration));
+  }
+  if (!import->fps) {
+    import->fps = 30;
+  }
+
+  import->frameCount = std::max<size_t>(
+      1, static_cast<size_t>(import->duration * import->fps + 0.5f) + 1);
+  if (import->frameCount <= 1 && sourceFrameCount > 1) {
+    import->frameCount = sourceFrameCount;
+  }
+
+  const auto *binding = import->container
+                            ? FindBindingForAnimation(*import->container,
+                                                      import->animation)
+                            : nullptr;
+  import->trackMap = BuildTrackMap(*import->animation, binding, import->skeleton);
+  import->outputTrackCount = import->skeleton
+                                 ? import->skeleton->GetNumBones()
+                                 : import->animation->GetNumOfTransformTracks();
+
+  *out = import.release();
+  return 1;
+}
+
+void SampleFrame(const AnimationImport &import, uint32_t frame, float *out) {
+  for (size_t bone = 0; bone < import.outputTrackCount; ++bone) {
+    uni::RTSValue value;
+    if (import.skeleton) {
+      if (const hkQTransform *ref = import.skeleton->GetBoneTM(bone)) {
+        value = uni::RTSValue(ref->translation, ref->rotation, ref->scale);
+      }
+    }
+    CopyTransform(value, out + bone * 10);
+  }
+
+  float time = 0.0f;
+  if (import.frameCount > 1) {
+    time = frame / static_cast<float>(import.fps);
+  }
+  if (import.duration > 0.0f) {
+    time = std::min(time, import.duration);
+  }
+
+  const size_t trackCount = import.animation->GetNumOfTransformTracks();
+  for (size_t track = 0; track < trackCount; ++track) {
+    size_t boneIndex = track;
+    if (track < import.trackMap.size() && import.trackMap[track] >= 0) {
+      boneIndex = static_cast<size_t>(import.trackMap[track]);
+    }
+
+    if (boneIndex >= import.outputTrackCount) {
+      continue;
+    }
+
+    uni::RTSValue value;
+    import.internal->GetValue(value, time, track);
+    CopyTransform(value, out + boneIndex * 10);
+  }
+}
+
 } 
 
 HEAT_API const char *HEAT_last_error() {
   return g_lastError.c_str();
 }
 
-HEAT_API int HEAT_import_skeleton(const char *path, char *out,
-                                  uint32_t capacity, uint32_t *required) {
+HEAT_API int HEAT_open_skeleton(const char *path, void **out) {
   return Guard([&]() {
-    if (!path) {
-      SetError("Missing skeleton path");
-      return 0;
+    auto *handle = static_cast<SkeletonImport *>(nullptr);
+    const int result = OpenSkeleton(path, &handle);
+    if (out) {
+      *out = handle;
     }
-
-    auto pack = IhkPackFile::Create(path);
-    const hkaSkeleton *skeleton = FindSkeleton(*pack);
-    if (!skeleton) {
-      SetError("No hkaSkeleton was found");
-      return 0;
-    }
-
-    return CopyResult(SkeletonToJson(*skeleton), out, capacity, required);
+    return result;
   });
 }
 
-HEAT_API int HEAT_import_animation(const char *animationPath,
-                                   const char *skeletonPath, char *out,
-                                   uint32_t capacity, uint32_t *required) {
+HEAT_API void HEAT_close_skeleton(void *handle) {
+  delete static_cast<SkeletonImport *>(handle);
+}
+
+HEAT_API const char *HEAT_skeleton_name(void *handle) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  return import && import->skeleton ? TempString(import->skeleton->Name()) : "";
+}
+
+HEAT_API uint32_t HEAT_skeleton_bone_count(void *handle) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  return import && import->skeleton
+             ? static_cast<uint32_t>(import->skeleton->GetNumBones())
+             : 0;
+}
+
+HEAT_API const char *HEAT_skeleton_bone_name(void *handle, uint32_t bone) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  if (!import || !import->skeleton || bone >= import->skeleton->GetNumBones()) {
+    return "";
+  }
+  return TempString(import->skeleton->GetBoneName(bone));
+}
+
+HEAT_API int32_t HEAT_skeleton_bone_parent(void *handle, uint32_t bone) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  if (!import || !import->skeleton || bone >= import->skeleton->GetNumBones()) {
+    return -1;
+  }
+  return import->skeleton->GetBoneParentID(bone);
+}
+
+HEAT_API int HEAT_skeleton_bone_transform(void *handle, uint32_t bone,
+                                          float *out10) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  if (!import || !import->skeleton || !out10 ||
+      bone >= import->skeleton->GetNumBones()) {
+    return 0;
+  }
+  if (const hkQTransform *tm = import->skeleton->GetBoneTM(bone)) {
+    CopyTransform(*tm, out10);
+    return 1;
+  }
+  return 0;
+}
+
+HEAT_API int HEAT_open_animation(const char *animationPath,
+                                 const char *skeletonPath, void **out) {
   return Guard([&]() {
-    if (!animationPath) {
-      SetError("Missing animation path");
-      return 0;
+    auto *handle = static_cast<AnimationImport *>(nullptr);
+    const int result = OpenAnimation(animationPath, skeletonPath, &handle);
+    if (out) {
+      *out = handle;
     }
-
-    auto animPack = IhkPackFile::Create(animationPath);
-    IhkPackFile::Ptr skeletonPack;
-    const hkaSkeleton *skeleton = nullptr;
-
-    if (skeletonPath && skeletonPath[0]) {
-      skeletonPack = IhkPackFile::Create(skeletonPath);
-      skeleton = FindSkeleton(*skeletonPack);
-    }
-
-    if (!skeleton) {
-      skeleton = FindSkeleton(*animPack);
-    }
-
-    std::string json = AnimationToJson(*animPack, skeleton);
-    if (!g_lastError.empty()) {
-      return 0;
-    }
-
-    return CopyResult(json, out, capacity, required);
+    return result;
   });
+}
+
+HEAT_API void HEAT_close_animation(void *handle) {
+  delete static_cast<AnimationImport *>(handle);
+}
+
+HEAT_API uint32_t HEAT_animation_fps(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import ? import->fps : 0;
+}
+
+HEAT_API uint32_t HEAT_animation_frame_count(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import ? static_cast<uint32_t>(import->frameCount) : 0;
+}
+
+HEAT_API uint32_t HEAT_animation_track_count(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import ? static_cast<uint32_t>(import->outputTrackCount) : 0;
+}
+
+HEAT_API const char *HEAT_animation_track_name(void *handle, uint32_t track) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  if (!import || track >= import->outputTrackCount) {
+    return "";
+  }
+  if (import->skeleton && track < import->skeleton->GetNumBones()) {
+    return TempString(import->skeleton->GetBoneName(track));
+  }
+  if (track < import->animation->GetNumAnnotations()) {
+    if (auto annot = import->animation->GetAnnotation(track)) {
+      return TempString(annot->GetName());
+    }
+  }
+  return "";
+}
+
+HEAT_API int HEAT_animation_sample_frame(void *handle, uint32_t frame,
+                                         float *out, uint32_t capacity) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  if (!import || !out || frame >= import->frameCount ||
+      capacity < import->outputTrackCount * 10) {
+    return 0;
+  }
+  SampleFrame(*import, frame, out);
+  return 1;
 }
 
 HEAT_API int HEAT_export_skeleton(const char *path, const char *skeletonText,

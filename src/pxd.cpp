@@ -5,13 +5,13 @@
 #include "acl/core/ansi_allocator.h"
 #include "acl/decompression/decompress.h"
 #include "acl/decompression/decompression_settings.h"
-#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -24,8 +24,6 @@
 #endif
 
 namespace {
-
-using json = nlohmann::json;
 
 thread_local std::string g_lastError;
 
@@ -73,7 +71,31 @@ struct Animation {
   std::vector<RootFrame> rootFrames;
 };
 
+struct SkeletonImport {
+  std::string name;
+  std::vector<Bone> bones;
+};
+
+struct AnimationImport {
+  float sampleRate = 30.0f;
+  float duration = 0.0f;
+  uint32_t frames = 1;
+  uint32_t tracks = 0;
+  std::vector<uint8_t> samples;
+  float rootSampleRate = 30.0f;
+  float rootDuration = 0.0f;
+  uint32_t rootFrames = 0;
+  uint32_t rootTracks = 0;
+  std::vector<uint8_t> rootSamples;
+};
+
 void SetError(std::string message) { g_lastError = std::move(message); }
+
+const char *TempString(std::string_view value) {
+  thread_local std::string temp;
+  temp.assign(value);
+  return temp.c_str();
+}
 
 uint16_t Read16(const std::vector<uint8_t> &buf, size_t off) {
   uint16_t v = 0;
@@ -161,24 +183,6 @@ std::string ReadString(const std::vector<uint8_t> &buf, size_t off) {
     out.push_back(static_cast<char>(buf[off++]));
   }
   return out;
-}
-
-int CopyResult(const std::string &payload, char *out, uint32_t capacity,
-               uint32_t *required) {
-  const auto need = static_cast<uint32_t>(payload.size() + 1);
-  if (required) {
-    *required = need;
-  }
-  if (!out || capacity == 0) {
-    return 1;
-  }
-  if (capacity < need) {
-    SetError("Output buffer is too small");
-    return 0;
-  }
-  std::copy(payload.begin(), payload.end(), out);
-  out[payload.size()] = '\0';
-  return 1;
 }
 
 std::vector<std::string> SplitTabs(const std::string &line) {
@@ -339,25 +343,12 @@ void WriteAnimationBinaHeader(std::vector<uint8_t> &buf, uint32_t fileSize,
   Write32(buf, 0x20, 4);
 }
 
-std::string SkeletonJson(const std::vector<Bone> &bones, std::string_view name) {
-  json root;
-  root["type"] = "skeleton";
-  root["name"] = name;
-  root["bones"] = json::array();
-  for (const auto &b : bones) {
-    root["bones"].push_back({
-        {"name", b.name},
-        {"parent", b.parent},
-        {"translation", {b.t[0], b.t[1], b.t[2]}},
-        {"rotation", {b.r[0], b.r[1], b.r[2], b.r[3]}},
-        {"scale", {b.s[0], b.s[1], b.s[2]}},
-    });
+int OpenSkeletonImpl(const char *path, SkeletonImport **out) {
+  if (!path || !out) {
+    SetError("Missing PXD skeleton path or output handle");
+    return 0;
   }
-  return root.dump();
-}
 
-int ImportSkeletonImpl(const char *path, char *out, uint32_t capacity,
-                       uint32_t *required) {
   std::vector<uint8_t> buf;
   if (!ReadFile(path, buf)) {
     return 0;
@@ -377,9 +368,11 @@ int ImportSkeletonImpl(const char *path, char *out, uint32_t capacity,
   const size_t nameOff = ds + Read32(buf, ds + 0x28);
   const size_t transformOff = ds + Read32(buf, ds + 0x48);
 
-  std::vector<Bone> bones(count);
+  auto import = std::make_unique<SkeletonImport>();
+  import->name = path;
+  import->bones.resize(count);
   for (uint32_t i = 0; i < count; ++i) {
-    Bone &b = bones[i];
+    Bone &b = import->bones[i];
     b.parent = static_cast<int16_t>(Read16(buf, parentOff + i * 2));
     b.name = ReadString(buf, ds + Read32(buf, nameOff + i * 0x10));
     const size_t base = transformOff + i * 0x30;
@@ -394,8 +387,9 @@ int ImportSkeletonImpl(const char *path, char *out, uint32_t capacity,
     b.s[1] = ReadF32(buf, base + 0x24);
     b.s[2] = ReadF32(buf, base + 0x28);
   }
-  return CopyResult(SkeletonJson(bones, path ? path : "PxdSkeleton"), out, capacity,
-                    required);
+
+  *out = import.release();
+  return 1;
 }
 
 int ExportSkeletonImpl(const char *path, const char *text) {
@@ -578,8 +572,12 @@ std::vector<uint8_t> CompressAcl(const Animation &anim) {
   return out;
 }
 
-int ImportAnimationImpl(const char *path, char *out, uint32_t capacity,
-                        uint32_t *required) {
+int OpenAnimationImpl(const char *path, AnimationImport **out) {
+  if (!path || !out) {
+    SetError("Missing PXD animation path or output handle");
+    return 0;
+  }
+
   std::vector<uint8_t> buf;
   if (!ReadFile(path, buf)) {
     return 0;
@@ -600,69 +598,37 @@ int ImportAnimationImpl(const char *path, char *out, uint32_t capacity,
   const size_t rootOff = ds + Read32(buf, ds + 0x30);
   const uint32_t chunkSize = Read32(buf, mainOff);
 
-  float duration = headerDuration;
-  float sampleRate = 30.0f;
-  uint32_t frames = headerFrames;
-  uint32_t tracks = headerTracks;
-  auto raw = DecompressAcl(buf.data() + mainOff, chunkSize, duration, sampleRate, frames, tracks);
-  if (raw.empty()) {
+  auto import = std::make_unique<AnimationImport>();
+  import->duration = headerDuration;
+  import->sampleRate = 30.0f;
+  import->frames = headerFrames;
+  import->tracks = headerTracks;
+  import->samples = DecompressAcl(buf.data() + mainOff, chunkSize,
+                                  import->duration, import->sampleRate,
+                                  import->frames, import->tracks);
+  if (import->samples.empty()) {
     return 0;
   }
 
-  json root;
-  root["type"] = "animation";
-  root["name"] = path ? path : "PxdAnimation";
-  root["fps"] = static_cast<int>(sampleRate + 0.5f);
-  root["duration"] = duration;
-  root["frames"] = frames;
-  root["tracks"] = json::array();
-
   if (rootOff > ds && rootOff < buf.size()) {
     const uint32_t rootChunkSize = Read32(buf, rootOff);
-    float rootDuration = duration;
-    float rootSampleRate = sampleRate;
-    uint32_t rootFrames = frames;
-    uint32_t rootTracks = 1;
-    auto rootRaw = DecompressAcl(buf.data() + rootOff, rootChunkSize, rootDuration,
-                                 rootSampleRate, rootFrames, rootTracks);
-    if (!rootRaw.empty() && rootTracks) {
-      json rootMotion;
-      rootMotion["duration"] = rootDuration;
-      rootMotion["up"] = {0.0f, 1.0f, 0.0f, 0.0f};
-      rootMotion["forward"] = {0.0f, 0.0f, 1.0f, 0.0f};
-      rootMotion["samples"] = json::array();
-      for (uint32_t frame = 0; frame < rootFrames; ++frame) {
-        const auto *qvv = reinterpret_cast<const rtm::qvvf *>(
-            rootRaw.data() + static_cast<size_t>(frame) * rootTracks * sizeof(rtm::qvvf));
-        float t[4];
-        rtm::vector_store(qvv->translation, t);
-        rootMotion["samples"].push_back({t[0], t[1], t[2], 0.0f});
-      }
-      root["rootMotion"] = std::move(rootMotion);
+    import->rootDuration = import->duration;
+    import->rootSampleRate = import->sampleRate;
+    import->rootFrames = import->frames;
+    import->rootTracks = 1;
+    import->rootSamples = DecompressAcl(buf.data() + rootOff, rootChunkSize,
+                                        import->rootDuration,
+                                        import->rootSampleRate,
+                                        import->rootFrames,
+                                        import->rootTracks);
+    if (import->rootTracks == 0) {
+      import->rootSamples.clear();
+      import->rootFrames = 0;
     }
   }
-  for (uint32_t track = 0; track < tracks; ++track) {
-    json trackJson;
-    trackJson["bone"] = track;
-    trackJson["name"] = "Bone_" + std::to_string(track);
-    trackJson["samples"] = json::array();
-    for (uint32_t frame = 0; frame < frames; ++frame) {
-      const auto *qvv =
-          reinterpret_cast<const rtm::qvvf *>(raw.data() +
-                                              (static_cast<size_t>(frame) * tracks + track) *
-                                                  sizeof(rtm::qvvf));
-      float q[4];
-      float t[4];
-      float s[4];
-      rtm::quat_store(qvv->rotation, q);
-      rtm::vector_store(qvv->translation, t);
-      rtm::vector_store(qvv->scale, s);
-      trackJson["samples"].push_back(
-          {t[0], t[1], t[2], q[0], q[1], q[2], q[3], s[0], s[1], s[2]});
-    }
-    root["tracks"].push_back(std::move(trackJson));
-  }
-  return CopyResult(root.dump(), out, capacity, required);
+
+  *out = import.release();
+  return 1;
 }
 
 int ExportAnimationImpl(const char *path, const char *text) {
@@ -748,20 +714,173 @@ int ExportAnimationImpl(const char *path, const char *text) {
   return WriteFile(path, buf) ? 1 : 0;
 }
 
+void CopyQvv(const rtm::qvvf &qvv, float *out10) {
+  float q[4];
+  float t[4];
+  float s[4];
+  rtm::quat_store(qvv.rotation, q);
+  rtm::vector_store(qvv.translation, t);
+  rtm::vector_store(qvv.scale, s);
+  out10[0] = t[0];
+  out10[1] = t[1];
+  out10[2] = t[2];
+  out10[3] = q[0];
+  out10[4] = q[1];
+  out10[5] = q[2];
+  out10[6] = q[3];
+  out10[7] = s[0];
+  out10[8] = s[1];
+  out10[9] = s[2];
+}
+
+const rtm::qvvf *AnimationSample(const std::vector<uint8_t> &samples,
+                                 uint32_t tracks, uint32_t frame,
+                                 uint32_t track) {
+  if (tracks == 0) {
+    return nullptr;
+  }
+  const size_t index = static_cast<size_t>(frame) * tracks + track;
+  const size_t offset = index * sizeof(rtm::qvvf);
+  if (offset + sizeof(rtm::qvvf) > samples.size()) {
+    return nullptr;
+  }
+  return reinterpret_cast<const rtm::qvvf *>(samples.data() + offset);
+}
+
 } // namespace
 
 HEAT_PXD_API const char *HEAT_PXD_last_error() { return g_lastError.c_str(); }
 
-HEAT_PXD_API int HEAT_PXD_import_skeleton(const char *path, char *out,
-                                          uint32_t capacity, uint32_t *required) {
+HEAT_PXD_API int HEAT_PXD_open_skeleton(const char *path, void **out) {
   g_lastError.clear();
-  return ImportSkeletonImpl(path, out, capacity, required);
+  auto *handle = static_cast<SkeletonImport *>(nullptr);
+  const int result = OpenSkeletonImpl(path, &handle);
+  if (out) {
+    *out = handle;
+  }
+  return result;
 }
 
-HEAT_PXD_API int HEAT_PXD_import_animation(const char *path, char *out,
-                                           uint32_t capacity, uint32_t *required) {
+HEAT_PXD_API void HEAT_PXD_close_skeleton(void *handle) {
+  delete static_cast<SkeletonImport *>(handle);
+}
+
+HEAT_PXD_API const char *HEAT_PXD_skeleton_name(void *handle) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  return import ? TempString(import->name) : "";
+}
+
+HEAT_PXD_API uint32_t HEAT_PXD_skeleton_bone_count(void *handle) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  return import ? static_cast<uint32_t>(import->bones.size()) : 0;
+}
+
+HEAT_PXD_API const char *HEAT_PXD_skeleton_bone_name(void *handle,
+                                                     uint32_t bone) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  if (!import || bone >= import->bones.size()) {
+    return "";
+  }
+  return TempString(import->bones[bone].name);
+}
+
+HEAT_PXD_API int32_t HEAT_PXD_skeleton_bone_parent(void *handle,
+                                                   uint32_t bone) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  if (!import || bone >= import->bones.size()) {
+    return -1;
+  }
+  return import->bones[bone].parent;
+}
+HEAT_PXD_API int HEAT_PXD_skeleton_bone_transform(void *handle, uint32_t bone,
+                                                  float *out10) {
+  auto *import = static_cast<SkeletonImport *>(handle);
+  if (!import || !out10 || bone >= import->bones.size()) {
+    return 0;
+  }
+  const Bone &b = import->bones[bone];
+  out10[0] = b.t[0];
+  out10[1] = b.t[1];
+  out10[2] = b.t[2];
+  out10[3] = b.r[0];
+  out10[4] = b.r[1];
+  out10[5] = b.r[2];
+  out10[6] = b.r[3];
+  out10[7] = b.s[0];
+  out10[8] = b.s[1];
+  out10[9] = b.s[2];
+  return 1;
+}
+
+HEAT_PXD_API int HEAT_PXD_open_animation(const char *path, void **out) {
   g_lastError.clear();
-  return ImportAnimationImpl(path, out, capacity, required);
+  auto *handle = static_cast<AnimationImport *>(nullptr);
+  const int result = OpenAnimationImpl(path, &handle);
+  if (out) {
+    *out = handle;
+  }
+  return result;
+}
+
+HEAT_PXD_API void HEAT_PXD_close_animation(void *handle) {
+  delete static_cast<AnimationImport *>(handle);
+}
+
+HEAT_PXD_API uint32_t HEAT_PXD_animation_fps(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import ? static_cast<uint32_t>(import->sampleRate + 0.5f) : 0;
+}
+
+HEAT_PXD_API uint32_t HEAT_PXD_animation_frame_count(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import ? import->frames : 0;
+}
+
+HEAT_PXD_API uint32_t HEAT_PXD_animation_track_count(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import ? import->tracks : 0;
+}
+
+HEAT_PXD_API int HEAT_PXD_animation_sample_frame(void *handle, uint32_t frame,
+                                                 float *out,
+                                                 uint32_t capacity) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  if (!import || !out || frame >= import->frames ||
+      capacity < import->tracks * 10) {
+    return 0;
+  }
+
+  for (uint32_t track = 0; track < import->tracks; ++track) {
+    const rtm::qvvf *qvv =
+        AnimationSample(import->samples, import->tracks, frame, track);
+    if (!qvv) {
+      return 0;
+    }
+    CopyQvv(*qvv, out + track * 10);
+  }
+  return 1;
+}
+
+HEAT_PXD_API uint32_t HEAT_PXD_animation_root_frame_count(void *handle) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  return import && !import->rootSamples.empty() ? import->rootFrames : 0;
+}
+
+HEAT_PXD_API int HEAT_PXD_animation_root_sample(void *handle, uint32_t frame,
+                                                float *out10) {
+  auto *import = static_cast<AnimationImport *>(handle);
+  if (!import || !out10 || frame >= import->rootFrames ||
+      import->rootSamples.empty()) {
+    return 0;
+  }
+
+  const rtm::qvvf *qvv =
+      AnimationSample(import->rootSamples, import->rootTracks, frame, 0);
+  if (!qvv) {
+    return 0;
+  }
+  CopyQvv(*qvv, out10);
+  return 1;
 }
 
 HEAT_PXD_API int HEAT_PXD_export_skeleton(const char *path, const char *text) {

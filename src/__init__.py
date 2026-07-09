@@ -9,7 +9,6 @@ bl_info = {
 }
 
 import ctypes
-import json
 import math
 import os
 import re
@@ -27,7 +26,6 @@ ORIENTATION_EULER = (math.radians(90.0), 0.0, 0.0)
 EXPORT_ANIMATION_FPS = 60
 ROOT_ANIM_CORRECTION = Quaternion((0.5, -0.5, -0.5, -0.5))
 ROOT_EXPORT_CORRECTION = Quaternion((0.5, 0.5, 0.5, 0.5))
-ROOT_MOTION_PROP = "heat_root_motion"
 ACTION_FPS_PROP = "heat_action_fps"
 SKELETON_SOURCE_PROP = "heat_skeleton_source_path"
 
@@ -81,22 +79,51 @@ def load_dll():
         raise HeatError(f"Could not load {path}: {ex}") from ex
     dll.HEAT_last_error.restype = ctypes.c_char_p
 
-    dll.HEAT_import_skeleton.argtypes = [
+    dll.HEAT_open_skeleton.argtypes = [
         ctypes.c_char_p,
-        ctypes.c_char_p,
-        ctypes.c_uint32,
-        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_void_p),
     ]
-    dll.HEAT_import_skeleton.restype = ctypes.c_int
+    dll.HEAT_open_skeleton.restype = ctypes.c_int
+    dll.HEAT_close_skeleton.argtypes = [ctypes.c_void_p]
+    dll.HEAT_close_skeleton.restype = None
+    dll.HEAT_skeleton_name.argtypes = [ctypes.c_void_p]
+    dll.HEAT_skeleton_name.restype = ctypes.c_char_p
+    dll.HEAT_skeleton_bone_count.argtypes = [ctypes.c_void_p]
+    dll.HEAT_skeleton_bone_count.restype = ctypes.c_uint32
+    dll.HEAT_skeleton_bone_name.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    dll.HEAT_skeleton_bone_name.restype = ctypes.c_char_p
+    dll.HEAT_skeleton_bone_parent.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    dll.HEAT_skeleton_bone_parent.restype = ctypes.c_int32
+    dll.HEAT_skeleton_bone_transform.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    dll.HEAT_skeleton_bone_transform.restype = ctypes.c_int
 
-    dll.HEAT_import_animation.argtypes = [
+    dll.HEAT_open_animation.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
-        ctypes.c_char_p,
-        ctypes.c_uint32,
-        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_void_p),
     ]
-    dll.HEAT_import_animation.restype = ctypes.c_int
+    dll.HEAT_open_animation.restype = ctypes.c_int
+    dll.HEAT_close_animation.argtypes = [ctypes.c_void_p]
+    dll.HEAT_close_animation.restype = None
+    dll.HEAT_animation_fps.argtypes = [ctypes.c_void_p]
+    dll.HEAT_animation_fps.restype = ctypes.c_uint32
+    dll.HEAT_animation_frame_count.argtypes = [ctypes.c_void_p]
+    dll.HEAT_animation_frame_count.restype = ctypes.c_uint32
+    dll.HEAT_animation_track_count.argtypes = [ctypes.c_void_p]
+    dll.HEAT_animation_track_count.restype = ctypes.c_uint32
+    dll.HEAT_animation_track_name.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    dll.HEAT_animation_track_name.restype = ctypes.c_char_p
+    dll.HEAT_animation_sample_frame.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_uint32,
+    ]
+    dll.HEAT_animation_sample_frame.restype = ctypes.c_int
 
     dll.HEAT_export_skeleton.argtypes = [
         ctypes.c_char_p,
@@ -121,41 +148,6 @@ def last_error(dll):
     if not raw:
         return "Unknown Hedgehog Engine Animation Tools error"
     return raw.decode("utf-8", errors="replace")
-
-
-def read_native_json(func, *args):
-    dll = load_dll()
-    required = ctypes.c_uint32(0)
-    ok = func(dll, *args, None, 0, ctypes.byref(required))
-    if not ok:
-        raise HeatError(last_error(dll))
-
-    buffer = ctypes.create_string_buffer(required.value)
-    ok = func(dll, *args, buffer, required.value, ctypes.byref(required))
-    if not ok:
-        raise HeatError(last_error(dll))
-
-    return json.loads(buffer.value.decode("utf-8"))
-
-
-def import_skeleton_native(path):
-    return read_native_json(
-        lambda dll, p, out, cap, req: dll.HEAT_import_skeleton(
-            path_bytes(p), out, cap, req
-        ),
-        path,
-    )
-
-
-def import_animation_native(path, skeleton_path):
-    skeleton_arg = path_bytes(skeleton_path) if skeleton_path else None
-    return read_native_json(
-        lambda dll, p, s, out, cap, req: dll.HEAT_import_animation(
-            path_bytes(p), s, out, cap, req
-        ),
-        path,
-        skeleton_arg,
-    )
 
 
 def native_quat(values):
@@ -187,6 +179,14 @@ def native_matrix(transform):
     return Matrix.LocRotScale(
         hk_to_blender_loc(transform["translation"]),
         hk_to_blender_quat(transform["rotation"]),
+        Vector((1.0, 1.0, 1.0)),
+    )
+
+
+def native_matrix_values(values):
+    return Matrix.LocRotScale(
+        hk_to_blender_loc(values[0:3]),
+        hk_to_blender_quat(values[3:7]),
         Vector((1.0, 1.0, 1.0)),
     )
 
@@ -320,8 +320,8 @@ def defer_set_rotation_ui(arm_obj):
         pass
 
 
-def create_armature_from_skeleton(data, object_name=None):
-    arm_data = bpy.data.armatures.new(object_name or skeleton_object_name(data))
+def create_armature_from_skeleton_handle(dll, handle, object_name=None):
+    arm_data = bpy.data.armatures.new(object_name or "HavokSkeleton")
     arm_obj = bpy.data.objects.new(arm_data.name, arm_data)
     bpy.context.collection.objects.link(arm_obj)
     bpy.ops.object.select_all(action="DESELECT")
@@ -329,13 +329,24 @@ def create_armature_from_skeleton(data, object_name=None):
     arm_obj.select_set(True)
     set_armature_transform(arm_obj)
 
-    bones = data["bones"]
-    local_mats = [native_matrix(b) for b in bones]
-    global_mats = [Matrix.Identity(4) for _ in bones]
-    children = [[] for _ in bones]
+    bone_count = int(dll.HEAT_skeleton_bone_count(handle))
+    names = []
+    parents = []
+    local_mats = []
+    global_mats = [Matrix.Identity(4) for _ in range(bone_count)]
+    children = [[] for _ in range(bone_count)]
+    values = (ctypes.c_float * 10)()
 
-    for i, bone in enumerate(bones):
-        parent = bone["parent"]
+    for i in range(bone_count):
+        bone_name = (dll.HEAT_skeleton_bone_name(handle, i) or b"").decode("utf-8", errors="replace")
+        names.append(clean_bone_name(bone_name) or f"Bone_{i:03d}")
+        parent = int(dll.HEAT_skeleton_bone_parent(handle, i))
+        parents.append(parent)
+        if not dll.HEAT_skeleton_bone_transform(handle, i, values):
+            raise HeatError("Failed to read skeleton bone transform")
+        local_mats.append(native_matrix_values(values))
+
+    for i, parent in enumerate(parents):
         if parent >= 0:
             children[parent].append(i)
             global_mats[i] = global_mats[parent] @ local_mats[i]
@@ -345,8 +356,7 @@ def create_armature_from_skeleton(data, object_name=None):
     bpy.ops.object.mode_set(mode="EDIT")
 
     edit_bones = []
-    for i, bone in enumerate(bones):
-        name = clean_bone_name(bone.get("name")) or f"Bone_{i:03d}"
+    for i, name in enumerate(names):
         eb = arm_data.edit_bones.new(name)
         eb.use_connect = False
         eb.use_inherit_rotation = True
@@ -357,8 +367,7 @@ def create_armature_from_skeleton(data, object_name=None):
         eb.roll = -math.pi * 0.5
         edit_bones.append(eb)
 
-    for i, bone in enumerate(bones):
-        parent = bone["parent"]
+    for i, parent in enumerate(parents):
         if parent >= 0:
             edit_bones[i].parent = edit_bones[parent]
             edit_bones[i].use_connect = False
@@ -547,14 +556,8 @@ def restore_child_object_matrices(saved):
             obj.matrix_world = matrix
 
 
-def rename_animation_bones(data, arm_obj):
-    tracks = data.get("tracks", [])
-    wanted = []
-    for track in tracks:
-        name = clean_bone_name(track.get("name"))
-        if name:
-            wanted.append(name)
-
+def rename_animation_bones_from_names(track_names, arm_obj):
+    wanted = [clean_bone_name(name) for name in track_names if clean_bone_name(name)]
     if not wanted:
         return
 
@@ -579,21 +582,25 @@ def rename_animation_bones(data, arm_obj):
             break
 
 
-def apply_animation_to_armature(data, arm_obj):
+def apply_animation_handle_to_armature(dll, handle, arm_obj):
     if not arm_obj:
         raise HeatError("Select an armature before importing an animation")
 
-    rename_animation_bones(data, arm_obj)
+    track_count = int(dll.HEAT_animation_track_count(handle))
+    frame_total = max(1, int(dll.HEAT_animation_frame_count(handle)))
+    fps = max(1, int(dll.HEAT_animation_fps(handle)))
+    track_names = [
+        (dll.HEAT_animation_track_name(handle, i) or b"").decode("utf-8", errors="replace")
+        for i in range(track_count)
+    ]
 
-    action_name = clean_bone_name(data.get("name")) or clean_bone_name(Path(bpy.context.scene.heat_last_animation_path).name) or "HavokAnimation"
+    rename_animation_bones_from_names(track_names, arm_obj)
+
+    action_name = clean_bone_name(Path(bpy.context.scene.heat_last_animation_path).name) or "HavokAnimation"
     action = bpy.data.actions.new(action_name)
     arm_obj.animation_data_create()
     arm_obj.animation_data.action = action
-    if data.get("rootMotion"):
-        action[ROOT_MOTION_PROP] = json.dumps(data["rootMotion"])
 
-    fps = max(1, int(data.get("fps", 30)))
-    frame_total = max(1, int(data.get("frames", 1)))
     action[ACTION_FPS_PROP] = float(fps)
     if hasattr(action, "use_frame_range"):
         action.use_frame_range = True
@@ -623,9 +630,8 @@ def apply_animation_to_armature(data, arm_obj):
         neutral_pose_bone(pb)
 
     track_targets = []
-    for track in data.get("tracks", []):
-        bone_index = int(track.get("bone", -1))
-        name = find_bone_name(track.get("name"), bone_index, bone_names, pose_lookup)
+    for track, track_name in enumerate(track_names):
+        name = find_bone_name(track_name, track, bone_names, pose_lookup)
         if name not in pose_bones:
             continue
         track_targets.append((track, name))
@@ -638,7 +644,11 @@ def apply_animation_to_armature(data, arm_obj):
         arm_obj.data.bones[reference_name].use_deform = False
         reference_descendants = {pb.name for pb in pose_bones[reference_name].children_recursive}
 
+    sample_values = (ctypes.c_float * (track_count * 10))()
     for frame in range(frame_total):
+        if not dll.HEAT_animation_sample_frame(handle, frame, sample_values, len(sample_values)):
+            raise HeatError("Failed to read animation frame")
+
         matrix_map_local = {}
         scale_map = {}
 
@@ -647,11 +657,9 @@ def apply_animation_to_armature(data, arm_obj):
             scale_map[pb.name] = Vector((1.0, 1.0, 1.0))
 
         for track, name in track_targets:
-            samples = track.get("samples", [])
-            if frame >= len(samples):
-                continue
+            base = track * 10
+            sample = sample_values[base:base + 10]
             pb = pose_bones[name]
-            sample = samples[frame]
             matrix_map_local[name] = sample_matrix_for_bone(sample, pb)
             scale_map[name] = sample_scale(sample)
 
@@ -843,49 +851,19 @@ def serialize_animation(arm_obj, pxd_main_tracks=False, preserve_bone_order=Fals
 
     entries = export_bones(arm_obj, preserve_order=preserve_bone_order)
     lines = [f"animation\t{fps}\t{duration:.9g}\t{frame_count}"]
-    root_motion = None
-    if ROOT_MOTION_PROP in action:
-        try:
-            root_motion = json.loads(action[ROOT_MOTION_PROP])
-        except Exception:
-            root_motion = None
-    derived_root_motion_index = None
-    derive_object_root_motion = False
-    if root_motion:
-        up = root_motion.get("up") or (0.0, 1.0, 0.0, 0.0)
-        forward = root_motion.get("forward") or (0.0, 0.0, 1.0, 0.0)
-        motion_duration = float(root_motion.get("duration", duration))
+    derived_root_motion_index = root_motion_source_index(arm_obj, entries, action)
+    derive_object_root_motion = (
+        derived_root_motion_index is None
+        and action_has_curve(action, "location")
+    )
+    if derived_root_motion_index is not None or derive_object_root_motion:
         lines.append(
             "rootmotion\t{}\t{}\t{}".format(
-                f"{motion_duration:.9g}",
-                "\t".join(f"{float(v):.9g}" for v in up[:4]),
-                "\t".join(f"{float(v):.9g}" for v in forward[:4]),
+                f"{duration:.9g}",
+                "\t".join(f"{v:.9g}" for v in (0.0, 1.0, 0.0, 0.0)),
+                "\t".join(f"{v:.9g}" for v in (0.0, 0.0, 1.0, 0.0)),
             )
         )
-        samples = root_motion.get("samples") or []
-        for frame, sample in enumerate(samples):
-            if len(sample) < 4:
-                continue
-            lines.append(
-                "rootframe\t{}\t{}".format(
-                    frame,
-                    "\t".join(f"{float(v):.9g}" for v in sample[:4]),
-                )
-            )
-    else:
-        derived_root_motion_index = root_motion_source_index(arm_obj, entries, action)
-        derive_object_root_motion = (
-            derived_root_motion_index is None
-            and action_has_curve(action, "location")
-        )
-        if derived_root_motion_index is not None or derive_object_root_motion:
-            lines.append(
-                "rootmotion\t{}\t{}\t{}".format(
-                    f"{duration:.9g}",
-                    "\t".join(f"{v:.9g}" for v in (0.0, 1.0, 0.0, 0.0)),
-                    "\t".join(f"{v:.9g}" for v in (0.0, 0.0, 1.0, 0.0)),
-                )
-            )
     for i, entry in enumerate(entries):
         lines.append(f"track\t{i}\t{sanitize_text(clean_bone_name(entry['name']))}")
 
@@ -1058,11 +1036,15 @@ class HEAT_OT_import_skeleton(bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         try:
-            data = import_skeleton_native(self.filepath)
+            dll = load_dll()
+            handle = ctypes.c_void_p()
+            if not dll.HEAT_open_skeleton(path_bytes(self.filepath), ctypes.byref(handle)):
+                raise HeatError(last_error(dll))
             fallback_name = clean_file_name(Path(self.filepath).name)
-            arm_obj = create_armature_from_skeleton(data, fallback_name)
-            clean_name = skeleton_object_name(data) or fallback_name or "HavokSkeleton"
-            clean_name = clean_file_name(clean_name)
+            skeleton_name = (dll.HEAT_skeleton_name(handle) or b"").decode("utf-8", errors="replace")
+            clean_name = clean_file_name(skeleton_name) or fallback_name or "HavokSkeleton"
+            arm_obj = create_armature_from_skeleton_handle(dll, handle, clean_name)
+            dll.HEAT_close_skeleton(handle)
             arm_obj.name = clean_name
             arm_obj.data.name = clean_name
             arm_obj[SKELETON_SOURCE_PROP] = self.filepath
@@ -1087,8 +1069,15 @@ class HEAT_OT_import_animation(bpy.types.Operator, ImportHelper):
             skeleton_path = arm_obj.get(SKELETON_SOURCE_PROP, "")
             if skeleton_path and not Path(skeleton_path).exists():
                 skeleton_path = ""
-            data = import_animation_native(self.filepath, skeleton_path or None)
-            apply_animation_to_armature(data, arm_obj)
+            dll = load_dll()
+            handle = ctypes.c_void_p()
+            skeleton_arg = path_bytes(skeleton_path) if skeleton_path else None
+            if not dll.HEAT_open_animation(
+                path_bytes(self.filepath), skeleton_arg, ctypes.byref(handle)
+            ):
+                raise HeatError(last_error(dll))
+            apply_animation_handle_to_armature(dll, handle, arm_obj)
+            dll.HEAT_close_animation(handle)
         except Exception as ex:
             self.report({"ERROR"}, str(ex))
             return {"CANCELLED"}
