@@ -963,6 +963,7 @@ PRESETS = (
     ("0", "Generations", ""),
     ("1", "Unleashed", ""),
     ("2", "Lost World", ""),
+    ("3", "Forces", ""),
 )
 
 GENERATIONS_PLATFORMS = (
@@ -983,6 +984,8 @@ LOST_WORLD_PLATFORMS = (
 
 
 def export_preset(game, generations="pc", unleashed="360", lost_world="pc"):
+    if game == "3":
+        return 7
     if game == "0":
         return {"pc": 0, "360": 2, "ps3": 3}.get(generations, 0)
     if game == "2":

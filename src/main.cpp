@@ -85,6 +85,7 @@ enum GameType {
   UNLEASHED_PS3_GAME_TYPE = 4,
   LOST_WORLD_PC_GAME_TYPE = 5,
   LOST_WORLD_WIIU_GAME_TYPE = 6,
+  FORCES_GAME_TYPE = 7,
 };
 
 constexpr Preset GENERATIONS_PC{HK2010_2, 0x4101};
@@ -583,6 +584,10 @@ int ExportSkeleton(const char *path, const char *text, int preset) {
   auto *skeleton = ParseSkeleton(file, text);
   container->skeletons.push_back(skeleton);
   AddRootAndContainer(root, container, "Animation Container");
+  if (preset == FORCES_GAME_TYPE) {
+    file.ToTagFile(path, HK2016_1);
+    return 1;
+  }
   const Preset p = GetPreset(preset);
   file.ToPackFile(path, p.toolset, p.rule);
   return 1;
@@ -622,6 +627,10 @@ int ExportAnimation(const char *path, const char *skeletonText,
     return 0;
   }
   AddRootAndContainer(root, container, "Merged Animation Container");
+  if (preset == FORCES_GAME_TYPE) {
+    file.ToTagFile(path, HK2016_1);
+    return 1;
+  }
   const Preset p = GetPreset(preset);
   file.ToPackFile(path, p.toolset, p.rule);
   return 1;
